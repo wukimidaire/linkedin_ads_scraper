@@ -18,6 +18,10 @@ from .utils import clean_text, clean_percentage, format_date
 from src.logger import setup_logger
 import re
 from datetime import datetime
+from dotenv import load_dotenv
+import os
+import aiohttp
+from playwright.async_api import async_playwright
 
 class AsyncLinkedInCrawler:
     def __init__(self, company_id: str, max_requests: int = 50):
@@ -25,6 +29,61 @@ class AsyncLinkedInCrawler:
         self.max_requests = max_requests
         self.detail_urls = set()
         self.logger = setup_logger("crawler")
+        
+        # Load proxy credentials
+        load_dotenv()
+        self.username = os.getenv('PROXY_USERNAME')
+        self.password = os.getenv('PROXY_PASSWORD')
+        
+        if not self.username or not self.password:
+            raise ValueError("Proxy credentials not found in .env file")
+        
+        # Initialize the proxy pool with HTTP proxies
+        self.proxy_pool = [
+            f"http://{self.username}:{self.password}@dc.smartproxy.com:{port}"
+            for port in range(10001, 10101)  # Adjust port range as needed
+        ]
+        self.current_proxy_index = 0
+
+    def _blacklist_proxy(self, proxy_server: str, blacklist_duration: int = 300):
+        """Blacklist a proxy server for a specified duration."""
+        if not hasattr(self, 'blacklisted_proxies'):
+            self.blacklisted_proxies = {}
+        
+        self.blacklisted_proxies[proxy_server] = asyncio.get_event_loop().time() + blacklist_duration
+        self.logger.warning(f"Blacklisted proxy: {proxy_server} for {blacklist_duration} seconds")
+    
+    def get_next_proxy(self) -> dict:
+        """Get the next proxy configuration in the correct format for Playwright."""
+        proxy_url = self.proxy_pool[self.current_proxy_index]
+        self.current_proxy_index = (self.current_proxy_index + 1) % len(self.proxy_pool)
+        
+        try:
+            # Parse the proxy URL
+            proxy_parts = proxy_url.split('://')
+            protocol = proxy_parts[0]  # http or socks5
+            auth_host_port = proxy_parts[1].split('@')
+            
+            if len(auth_host_port) == 2:
+                auth, host_port = auth_host_port
+                username, password = auth.split(':')
+                host, port = host_port.split(':')
+            else:
+                host_port = auth_host_port[0]
+                host, port = host_port.split(':')
+                username = self.username
+                password = self.password
+            
+            # Format proxy config according to Playwright's requirements
+            return {
+                "server": f"{host}:{port}",  # Remove protocol prefix
+                "username": username,
+                "password": password
+            }
+        except Exception as e:
+            self.logger.error(f"Error parsing proxy URL {proxy_url}: {str(e)}")
+            # Return a fallback proxy if available, or raise the exception
+            raise
 
     async def collect_ad_urls(self, page: Page) -> None:
         self.logger.info("Starting URL collection")
@@ -123,114 +182,110 @@ class AsyncLinkedInCrawler:
                 self.logger.warning("Reached maximum scroll count")
                 break
 
+    async def create_browser_context(self, browser, url):
+        """Creates and validates a browser context with a proxy."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            proxy_config = self.get_next_proxy()
+            try:
+                context = await browser.new_context(
+                    viewport=VIEWPORT_CONFIG,
+                    user_agent=USER_AGENT,
+                    proxy={
+                        "server": proxy_config["server"],
+                        "username": proxy_config.get("username"),  # Use get to handle missing keys
+                        "password": proxy_config.get("password")
+                    }
+                )
+
+                # Validate the proxy within Playwright
+                async def check_proxy(route):
+                    await route.continue_()  # Allow the request
+
+                intercepted_request = False
+                async def handle_request(route):
+                    nonlocal intercepted_request
+                    intercepted_request = True
+                    await check_proxy(route)
+
+                page = await context.new_page()
+                await page.route("**/*", handle_request)  # Intercept requests to ensure proxy works
+                try:
+                    await page.goto("https://www.linkedin.com", timeout=10000, wait_until="domcontentloaded") # Use LinkedIn for validation
+                except Exception as e:
+                    raise Exception(f"Proxy validation failed: {e}") from e
+                finally:
+                    await page.close()
+
+                if not intercepted_request:
+                    raise Exception("Proxy not used for requests")
+
+                self.logger.debug(f"Proxy {proxy_config['server']} validated successfully for {url}")
+                return context, proxy_config
+            except Exception as e:
+                self.logger.error(f"Proxy setup failed for {url} (attempt {attempt+1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    raise  # Re-raise the exception after all retries fail
+                # Optionally add a delay between retries
+                await asyncio.sleep(2)
+                continue # proceed to the next attempt
+
     async def process_all_ads(self, page: Page) -> list:
         all_ad_details = []
-        total_ads = len(self.detail_urls)
-        start_time = datetime.now()
-        
-        self.logger.info(f"Starting parallel processing of {total_ads} ads with {MAX_CONCURRENT_PAGES} concurrent pages")
+        browser = page.context.browser
         
         try:
-            # Create multiple browser contexts
-            browser = page.context.browser
-            contexts = []
-            pages = []
+            url_chunks = [list(chunk) for chunk in self._chunk_urls(self.detail_urls, CHUNK_SIZE)]
             
-            # Initialize parallel contexts
-            self.logger.debug(f"Initializing {MAX_CONCURRENT_PAGES} browser contexts")
-            for i in range(MAX_CONCURRENT_PAGES):
-                try:
-                    context = await browser.new_context(
-                        viewport=VIEWPORT_CONFIG,
-                        user_agent=USER_AGENT
-                    )
-                    contexts.append(context)
-                    pages.append(await context.new_page())
-                    self.logger.debug(f"Context {i+1}/{MAX_CONCURRENT_PAGES} initialized successfully")
-                except Exception as e:
-                    self.logger.error(f"Failed to initialize context {i+1}: {str(e)}")
-                    raise
-
-            # Process URLs in chunks
-            url_chunks = [list(urls) for urls in self._chunk_urls(self.detail_urls, CHUNK_SIZE)]
-            total_chunks = len(url_chunks)
-            self.logger.info(f"Split {total_ads} URLs into {total_chunks} chunks of size {CHUNK_SIZE}")
-            
-            for chunk_index, url_chunk in enumerate(url_chunks):
-                chunk_start_time = datetime.now()
-                self.logger.info(f"Processing chunk {chunk_index + 1}/{total_chunks} with {len(url_chunk)} URLs")
-                
+            for chunk_index, chunk in enumerate(url_chunks):
+                self.logger.info(f"Processing chunk {chunk_index + 1}/{len(url_chunks)}")
                 tasks = []
-                for i, url in enumerate(url_chunk):
-                    page_index = i % len(pages)
-                    self.logger.debug(f"Creating task for URL {url} using page {page_index + 1}")
-                    task = asyncio.create_task(
-                        self.extract_ad_details(
-                            pages[page_index],
-                            url,
-                            f"[Chunk {chunk_index + 1}/{total_chunks}]"
-                        )
-                    )
-                    tasks.append(task)
+                contexts = []
                 
-                # Process chunk in parallel
-                try:
-                    chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    successful_results = []
-                    
-                    for i, result in enumerate(chunk_results):
-                        if isinstance(result, Exception):
-                            self.logger.error(f"Failed to process URL {url_chunk[i]}: {str(result)}")
-                        elif result:
-                            successful_results.append(result)
-                    
+                for url in chunk:
+                    try:
+                        context, proxy_config = await self.create_browser_context(browser, url)
+                        contexts.append(context)
+                        
+                        new_page = await context.new_page()
+                        await new_page.route("**/*", self._filter_requests)
+                        
+                        task = asyncio.create_task(
+                            self.extract_ad_details(new_page, url)
+                        )
+                        tasks.append(task)
+                        
+                    except Exception as e:
+                        self.logger.error(f"Failed to set up context for URL {url}: {str(e)}")
+                        continue
+                
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    successful_results = [r for r in results if isinstance(r, dict)]
                     all_ad_details.extend(successful_results)
-                    
-                    chunk_duration = (datetime.now() - chunk_start_time).total_seconds()
-                    self.logger.info(
-                        f"Chunk {chunk_index + 1}/{total_chunks} completed: "
-                        f"{len(successful_results)}/{len(url_chunk)} successful in {chunk_duration:.2f}s"
-                    )
-                    
-                except Exception as e:
-                    self.logger.error(f"Error processing chunk {chunk_index + 1}: {str(e)}")
+                
+                # Clean up contexts
+                for context in contexts:
+                    await context.close()
                 
                 # Add delay between chunks
-                if chunk_index > 0:
-                    self.logger.debug(f"Waiting {RETRY_DELAY * 2}s between chunks to avoid rate limiting")
-                    await asyncio.sleep(RETRY_DELAY * 2)
-
+                await asyncio.sleep(2)
+        
         except Exception as e:
-            self.logger.error(f"Fatal error during parallel processing: {str(e)}", exc_info=True)
+            self.logger.error(f"Error in process_all_ads: {str(e)}")
             raise
-        
-        finally:
-            # Cleanup
-            self.logger.debug("Cleaning up browser contexts")
-            for i, context in enumerate(contexts):
-                try:
-                    await context.close()
-                    self.logger.debug(f"Context {i+1} closed successfully")
-                except Exception as e:
-                    self.logger.error(f"Error closing context {i+1}: {str(e)}")
-        
-        # Final statistics
-        total_duration = (datetime.now() - start_time).total_seconds()
-        success_rate = (len(all_ad_details) / total_ads) * 100
-        
-        self.logger.info(
-            f"Processing complete: {len(all_ad_details)}/{total_ads} ads processed successfully "
-            f"({success_rate:.1f}%) in {total_duration:.2f}s"
-        )
         
         return all_ad_details
 
     async def extract_ad_details(self, page: Page, url: str, progress: str = "") -> dict:
-        """Extract details from a single ad page"""
+        """Extract detailed ad content from the page."""
         for attempt in range(RETRY_COUNT):
             try:
-                # Block unnecessary resources before navigation
-                await page.route("**/*", lambda route: self._filter_requests(route))
+                # Get proxy config for this request
+                proxy_config = self.get_next_proxy()
+                
+                # Update the route handler to include proxy_config
+                await page.route("**/*", lambda route: self._filter_requests(route, proxy_config))
                 
                 start_time = datetime.now()
                 total_size = 0
@@ -445,50 +500,90 @@ class AsyncLinkedInCrawler:
             return None
 
     # Add request filtering
-    async def _filter_requests(self, route):
-        """Filter out unnecessary resources to reduce page load size"""
-        request = route.request
-        resource_type = request.resource_type
-        url = request.url.lower()
-
-        # Always allow main document and essential ad content
-        if resource_type == "document" or "ad-library" in url:
-            await route.continue_()
-            return
-
-        # Block specific resource types
-        if resource_type in ["media", "video", "font"]:
+    async def _filter_requests(self, route, proxy_config=None):
+        """Filter and modify requests with proper error handling."""
+        try:
+            if route.request.resource_type in ['image', 'stylesheet', 'font']:
+                await route.abort()
+                return
+            
+            headers = route.request.headers.copy()
+            headers['User-Agent'] = USER_AGENT
+            
+            # Add proxy authentication headers if needed
+            if proxy_config:
+                headers['Proxy-Authorization'] = f"Basic {proxy_config.get('auth', '')}"
+            
+            await route.continue_(headers=headers)
+            
+        except Exception as e:
+            self.logger.error(f"Route error: {str(e)}")
             await route.abort()
-            return
 
-        # Block large image formats
-        if resource_type == "image" and any(ext in url for ext in ['.gif', '.webp']):
-            await route.abort()
-            return
+    async def test_proxies(self):
+        """Test all proxies in the pool."""
+        for proxy in self.proxy_pool:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        'https://ip.smartproxy.com/json',
+                        proxy=proxy,  # HTTP proxy
+                        timeout=10
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            self.logger.info(f"Proxy {proxy} is working. IP: {data.get('proxy', {}).get('ip')}")
+                        else:
+                            self.logger.error(f"Proxy {proxy} returned status {response.status}")
+                            self._blacklist_proxy(proxy.split('://')[-1].split('@')[0])
+            except Exception as e:
+                self.logger.error(f"Proxy {proxy} failed: {str(e)}")
+                self._blacklist_proxy(proxy.split('://')[-1].split('@')[0])
 
-        # Block non-essential scripts and stylesheets
-        if resource_type in ["script", "stylesheet"] and not any(
-            essential in url for essential in [
-                "ad-library",
-                "essential",
-                "core"
-            ]
-        ):
-            await route.abort()
-            return
+    async def _test_proxy_connection(self, context, proxy_info):
+        """Test proxy connection before using it"""
+        try:
+            test_page = await context.new_page()
+            await test_page.goto('https://ip.smartproxy.com/json', 
+                               timeout=5000,
+                               wait_until='networkidle')
+            await test_page.close()
+            return True
+        except Exception as e:
+            self.logger.error(f"Proxy test failed for {proxy_info['server']}: {str(e)}")
+            return False
 
-        # Block tracking and analytics
-        if any(pattern in url for pattern in [
-            "analytics",
-            "tracking",
-            "metrics",
-            "telemetry",
-            "logging",
-            "pixel",
-            "beacon"
-        ]):
-            await route.abort()
-            return
+    async def validate_proxy(self, proxy_config: dict) -> bool:
+        """Validate proxy configuration before using it."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                proxy_url = f"http://{proxy_config['username']}:{proxy_config['password']}@{proxy_config['server']}"
+                async with session.get(
+                    'https://ip.smartproxy.com/json',
+                    proxy=proxy_url,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        self.logger.debug(f"Proxy {proxy_config['server']} validated successfully")
+                        return True
+                    else:
+                        self.logger.warning(f"Proxy {proxy_config['server']} validation failed with status {response.status}")
+                        return False
+        except Exception as e:
+            self.logger.error(f"Proxy {proxy_config['server']} validation error: {str(e)}")
+            return False
 
-        # Allow everything else
-        await route.continue_()
+async def test_proxy(proxy_config):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(proxy=proxy_config)
+            page = await context.new_page()
+            await page.goto('https://ip.smartproxy.com/json', timeout=10000)
+            content = await page.content()
+            print(content)
+            await context.close()
+        except Exception as e:
+            print(f"Proxy {proxy_config['server']} failed: {e}")
+        finally:
+            await browser.close()

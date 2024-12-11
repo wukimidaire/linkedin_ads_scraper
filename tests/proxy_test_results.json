@@ -1,0 +1,51 @@
+{
+  "working": [
+    {
+      "proxy": {
+        "username": "sppmfdvt0c",
+        "password": "Fj7oh2yyxlT9H=xCf6",
+        "port": "10001"
+      },
+      "status": "working",
+      "ip": null,
+      "response_time": 1.08,
+      "error": null,
+      "data": {
+        "browser": {
+          "name": "Safari"
+        },
+        "platform": {
+          "os": "Windows NT 10.0",
+          "type": "desktop"
+        },
+        "engine": {
+          "name": "Blink"
+        },
+        "isp": {
+          "isp": "Adcil-asn-01",
+          "asn": 401152,
+          "domain": "acedatacenter.com",
+          "organization": "Adcil-asn-01"
+        },
+        "city": {
+          "name": "",
+          "code": "",
+          "state": "",
+          "time_zone": "America/Chicago",
+          "zip_code": "",
+          "latitude": 37.751,
+          "longitude": -97.822
+        },
+        "proxy": {
+          "ip": "23.27.90.150"
+        },
+        "country": {
+          "code": "US",
+          "name": "United States",
+          "continent": "North America"
+        }
+      }
+    }
+  ],
+  "failed": []
+}

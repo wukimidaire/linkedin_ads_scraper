@@ -35,10 +35,38 @@ VIEWPORT_CONFIG = {
 
 # Add these new constants
 RETRY_COUNT = 3
-PAGE_TIMEOUT = 30000  # 30 seconds
+PAGE_TIMEOUT = 60000  # 60 seconds
 NAVIGATION_TIMEOUT = 30000  # 30 seconds
-RETRY_DELAY = 2  # seconds
+RETRY_DELAY = 2  # seconds between retries
 
 # Performance tuning
-MAX_CONCURRENT_PAGES = 2  # Reduced from 3 to avoid rate limiting
-CHUNK_SIZE = 2  # Reduced from 3 to avoid rate limiting
+MAX_CONCURRENT_PAGES = 2
+CHUNK_SIZE = 4
+
+# Performance optimization settings
+PERFORMANCE_CONFIG = {
+    'viewport': {
+        'width': 1024,
+        'height': 768,
+        'deviceScaleFactor': 1,
+    },
+    'javascript_enabled': True,
+    'bypass_csp': True,  # Bypass Content Security Policy
+    'ignore_https_errors': True,
+    'proxy': None,  # Add proxy support if needed
+}
+
+# Resource optimization
+RESOURCE_LIMITS = {
+    'max_concurrent_requests': 4,
+    'max_request_size': 1024 * 1024 * 5,  # 5MB
+    'request_timeout': 15000,  # 15 seconds
+}
+
+# Timing configurations
+TIMING_CONFIG = {
+    'navigation_timeout': 20000,
+    'content_timeout': 5000,
+    'retry_delay': 2000,
+    'max_retries': 3,
+}
