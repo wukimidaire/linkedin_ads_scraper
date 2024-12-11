@@ -3,43 +3,32 @@ import re
 import emoji
 
 
-def clean_text(text):
-    """Clean text using the emoji library"""
+def clean_text(text: str) -> str:
+    """Clean and normalize text content"""
     if not text:
         return ""
-    
-    text = emoji.demojize(text)
+    # Remove HTML tags, extra whitespace, and normalize
     text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\n+', '\n', text)
-    text = re.sub(r' +', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def clean_percentage(percentage_str):
-    """Clean percentage string"""
-    if not percentage_str:
+def clean_percentage(value: str) -> str:
+    """Clean and format percentage values"""
+    if not value:
         return "0%"
-    if "less than" in percentage_str.lower():
+    value = value.lower()
+    if "less than" in value:
         return "<1%"
-    cleaned = ''.join(char for char in percentage_str if char.isdigit() or char == '%')
-    return cleaned if cleaned else "0%"
+    return value.strip()
 
-def format_date(date_string):
+def format_date(date_str: str) -> str:
     """Format date string to YYYY/MM/DD"""
-    if not date_string:
+    if not date_str:
         return None
-    
-    month_map = {
-        'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
-        'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
-        'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
-    }
-    
     try:
-        month, day, year = re.match(r'(\w+) (\d{1,2}), (\d{4})', date_string).groups()
-        month_num = month_map[month]
-        day_padded = str(day).zfill(2)
-        return f"{year}/{month_num}/{day_padded}"
-    except Exception as e:
+        date_obj = datetime.strptime(date_str.strip(), '%b %d, %Y')
+        return date_obj.strftime('%Y/%m/%d')
+    except Exception:
         return None
 
 def extract_with_regex(pattern, html, group=1):
