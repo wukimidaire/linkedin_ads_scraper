@@ -14,6 +14,11 @@
 
 ## 📋 Overview
 
+**Tech Stack**: Python, FastAPI, Playwright, Docker, CI/CD
+**Key Features**:
+    - Automated collection of LinkedIn Ad Library data
+    - Asynchronous crawling with parallel processing
+
 A high-performance web crawler that helps businesses and researchers analyze advertising strategies on LinkedIn by automatically collecting and analyzing ads from LinkedIn's Ad Library. Built with FastAPI and Playwright, this tool provides valuable competitive intelligence and market research data.
 
 ### 🎯 Problem Statement
