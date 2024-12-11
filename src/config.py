@@ -34,11 +34,11 @@ VIEWPORT_CONFIG = {
 }
 
 # Add these new constants
-RETRY_COUNT = 2
-PAGE_TIMEOUT = 10000  # 10 seconds
-NAVIGATION_TIMEOUT = 5000  # 5 seconds
-RETRY_DELAY = 1  # second
+RETRY_COUNT = 3
+PAGE_TIMEOUT = 30000  # 30 seconds
+NAVIGATION_TIMEOUT = 30000  # 30 seconds
+RETRY_DELAY = 2  # seconds
 
 # Performance tuning
-MAX_CONCURRENT_PAGES = 3
-CHUNK_SIZE = 3
+MAX_CONCURRENT_PAGES = 2  # Reduced from 3 to avoid rate limiting
+CHUNK_SIZE = 2  # Reduced from 3 to avoid rate limiting
