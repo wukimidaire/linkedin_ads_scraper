@@ -25,6 +25,8 @@ class AsyncLinkedInCrawler:
         self.max_requests = max_requests
         self.detail_urls = set()
         self.logger = setup_logger("crawler")
+        self.consecutive_timeouts = 0
+        self.max_consecutive_timeouts = 3
 
     async def collect_ad_urls(self, page: Page) -> None:
         self.logger.info("Starting URL collection")
@@ -180,8 +182,18 @@ class AsyncLinkedInCrawler:
                     
                     for i, result in enumerate(chunk_results):
                         if isinstance(result, Exception):
-                            self.logger.error(f"Failed to process URL {url_chunk[i]}: {str(result)}")
+                            error_msg = str(result)
+                            if "Timeout" in error_msg:
+                                self.consecutive_timeouts += 1
+                                self.logger.warning(f"Timeout error {self.consecutive_timeouts}/3")
+                                if self.consecutive_timeouts >= self.max_consecutive_timeouts:
+                                    self.logger.error("Maximum consecutive timeouts reached. Stopping processing.")
+                                    return all_ad_details
+                            else:
+                                self.consecutive_timeouts = 0
+                            self.logger.error(f"Failed to process URL {url_chunk[i]}: {error_msg}")
                         elif result:
+                            self.consecutive_timeouts = 0
                             successful_results.append(result)
                     
                     all_ad_details.extend(successful_results)
@@ -202,7 +214,7 @@ class AsyncLinkedInCrawler:
 
         except Exception as e:
             self.logger.error(f"Fatal error during parallel processing: {str(e)}", exc_info=True)
-            raise
+            return all_ad_details
         
         finally:
             # Cleanup
@@ -297,10 +309,12 @@ class AsyncLinkedInCrawler:
                     
             except Exception as e:
                 self.logger.error(f"Error on attempt {attempt + 1}: {str(e)}")
+                if "Timeout" in str(e):
+                    raise
                 if attempt == RETRY_COUNT - 1:
                     self.logger.error(f"Failed to process {url} after {RETRY_COUNT} attempts")
                     return None
-                await asyncio.sleep(RETRY_DELAY * (attempt + 1))  # Progressive delay
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                 continue
 
         return None
