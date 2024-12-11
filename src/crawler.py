@@ -31,41 +31,96 @@ class AsyncLinkedInCrawler:
         previous_links_count = 0
         consecutive_unchanged_counts = 0
         scroll_count = 0
+        last_height = 0
+
+        # Wait for initial content
+        try:
+            await page.wait_for_selector("a[href*='/ad-library/detail/']", timeout=5000)
+        except Exception as e:
+            self.logger.warning(f"Initial content wait timeout: {str(e)}")
 
         while True:
             self.logger.debug(f"Scroll iteration {scroll_count}")
-            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            await asyncio.sleep(3)
-            scroll_count += 1
+            
+            # Get current scroll height
+            current_height = await page.evaluate('document.body.scrollHeight')
+            
+            # Break if we've reached the bottom and no new content loaded
+            if current_height == last_height:
+                consecutive_unchanged_counts += 1
+            else:
+                consecutive_unchanged_counts = 0
+                last_height = current_height
 
+            # Scroll with more sophisticated approach
             try:
+                await page.evaluate('''() => {
+                    window.scrollTo({
+                        top: document.body.scrollHeight,
+                        behavior: 'instant'
+                    });
+                    // Trigger any lazy loading
+                    window.dispatchEvent(new Event('scroll'));
+                }''')
+                
+                # Wait for potential new content
+                await asyncio.sleep(2)
+                
+                # Check for new ads with more specific selector
                 links = await page.eval_on_selector_all(
-                    "a[href]", 
-                    "elements => elements.map(el => el.href)"
+                    "a[href*='/ad-library/detail/']",
+                    "elements => Array.from(elements).map(el => el.href)"
                 )
                 
                 current_links = set()
                 for link in links:
-                    if "/ad-library/detail/" in link:
-                        clean_link = link.split('?')[0]
-                        current_links.add(clean_link)
-                        if clean_link not in self.detail_urls:
-                            self.detail_urls.add(clean_link)
-                            self.logger.debug(f"Found new URL: {clean_link}")
+                    clean_link = link.split('?')[0]
+                    current_links.add(clean_link)
+                    if clean_link not in self.detail_urls:
+                        self.detail_urls.add(clean_link)
+                        self.logger.debug(f"Found new URL: {clean_link}")
 
-                if len(current_links) == previous_links_count:
-                    consecutive_unchanged_counts += 1
-                    self.logger.debug(f"No new links found. Unchanged count: {consecutive_unchanged_counts}")
-                else:
-                    consecutive_unchanged_counts = 0
-
+                # Log progress
+                if len(current_links) > previous_links_count:
+                    self.logger.info(f"Found {len(current_links) - previous_links_count} new URLs. Total: {len(self.detail_urls)}")
+                
                 previous_links_count = len(current_links)
 
             except Exception as e:
-                self.logger.error(f"Error during URL collection: {str(e)}", exc_info=True)
+                self.logger.error(f"Error during scroll: {str(e)}")
+                consecutive_unchanged_counts += 1
 
-            if (consecutive_unchanged_counts >= 5 and scroll_count >= 3) or scroll_count >= 500:
+            scroll_count += 1
+
+            # More sophisticated exit conditions
+            if (consecutive_unchanged_counts >= 5 and scroll_count >= 3) or scroll_count >= 50:
+                # Double-check by scrolling back up and down
+                try:
+                    await page.evaluate('window.scrollTo(0, 0)')
+                    await asyncio.sleep(1)
+                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await asyncio.sleep(2)
+                    
+                    final_links = await page.eval_on_selector_all(
+                        "a[href*='/ad-library/detail/']",
+                        "elements => Array.from(elements).map(el => el.href)"
+                    )
+                    
+                    for link in final_links:
+                        clean_link = link.split('?')[0]
+                        if clean_link not in self.detail_urls:
+                            self.detail_urls.add(clean_link)
+                            self.logger.debug(f"Found additional URL in final check: {clean_link}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error during final check: {str(e)}")
+
                 self.logger.info(f"URL collection complete. Found {len(self.detail_urls)} unique URLs")
+                break
+
+            # Prevent infinite loops
+            if scroll_count > 100:
+                self.logger.warning("Reached maximum scroll count")
                 break
 
     async def process_all_ads(self, page: Page) -> list:
@@ -171,173 +226,84 @@ class AsyncLinkedInCrawler:
         return all_ad_details
 
     async def extract_ad_details(self, page: Page, url: str, progress: str = "") -> dict:
-        """Extract details from a single ad page with retry logic"""
-        retry_count = 0
-        while retry_count < RETRY_COUNT:
+        """Extract details from a single ad page"""
+        for attempt in range(RETRY_COUNT):
             try:
-                # Reset page if needed
-                if retry_count > 0:
-                    await page.reload()
-                    await asyncio.sleep(RETRY_DELAY * (retry_count + 1))  # Exponential backoff
+                # Block unnecessary resources before navigation
+                await page.route("**/*", lambda route: self._filter_requests(route))
                 
-                # Add initial wait before navigation
-                await asyncio.sleep(2)
+                start_time = datetime.now()
+                total_size = 0
+                response_count = 0
                 
-                # More robust navigation
-                await page.goto(
-                    url, 
-                    wait_until='networkidle',  # Changed from domcontentloaded
-                    timeout=NAVIGATION_TIMEOUT
-                )
-                
-                # Wait for any of these selectors
-                try:
-                    await page.wait_for_selector(
-                        '.ad-library-preview-container, .about-ad__availability-duration, .ad-analytics__country-impressions',
-                        timeout=PAGE_TIMEOUT,
-                        state='visible'  # Wait for actual visibility
-                    )
-                except Exception as e:
-                    self.logger.warning(f"{progress} Timeout waiting for content: {str(e)}, retrying...")
-                    retry_count += 1
-                    continue
-
-                # Basic ad details
-                ad_details = {
+                metrics = {
                     'url': url,
-                    'ad_id': url.split('/')[-1],
-                    'company_id': self.company_id
+                    'attempt': attempt + 1,
+                    'size_mb': 0,
+                    'resources': 0,
+                    'timing': {}
                 }
 
-                # Extract campaign dates
-                try:
-                    date_selector = '.about-ad__availability-duration'
-                    await page.wait_for_selector(date_selector, timeout=5000)
-                    duration_text = await page.eval_on_selector(date_selector, 'el => el.innerText')
-                    
-                    # Parse dates from text like "Ran from Mar 1, 2024 to Mar 15, 2024"
-                    if 'Ran from' in duration_text:
-                        dates = duration_text.replace('Ran from ', '').split(' to ')
-                        ad_details['start_date'] = format_date(dates[0])
-                        ad_details['end_date'] = format_date(dates[1]) if len(dates) > 1 else None
-                except Exception as e:
-                    self.logger.debug(f"Failed to extract dates: {str(e)}")
-                    ad_details['start_date'] = None
-                    ad_details['end_date'] = None
-
-                # Extract impressions range
-                try:
-                    impressions_selector = 'p:has-text("Total Impressions") + p'
-                    impressions = await page.eval_on_selector(impressions_selector, 'el => el.innerText')
-                    ad_details['total_impressions_range'] = clean_text(impressions)
-                except Exception:
-                    ad_details['total_impressions_range'] = None
-
-                # Extract country impressions
-                try:
-                    country_selector = '.ad-analytics__country-impressions'
-                    countries = await page.query_selector_all(country_selector)
-                    country_impressions = []
-                    
-                    for country_elem in countries:
-                        aria_label = await country_elem.get_attribute('aria-label')
-                        if aria_label:
-                            country, percentage = aria_label.split(', impressions ')
-                            country_impressions.append({
-                                'country': country,
-                                'impressionsPercentage': percentage
-                            })
-                    ad_details['country_impressions'] = country_impressions
-                except Exception:
-                    ad_details['country_impressions'] = []
-
-                # Extract advertiser details
-                try:
-                    logo_selector = 'img[alt="advertiser logo"]'
-                    logo_elem = await page.query_selector(logo_selector)
-                    if logo_elem:
-                        ad_details['advertiser_logo_url'] = await logo_elem.get_attribute('src')
-                    
-                    advertiser_selector = 'a[href*="/company/"], a[href*="/in/"]'
-                    advertiser_elem = await page.query_selector(advertiser_selector)
-                    if advertiser_elem:
-                        ad_details['advertiser_name'] = await advertiser_elem.inner_text()
-                        href = await advertiser_elem.get_attribute('href')
-                        ad_details['ad_type'] = 'personal_ad' if '/in/' in href else 'company_ad'
-                except Exception:
-                    ad_details['advertiser_logo_url'] = None
-                    ad_details['advertiser_name'] = None
-                    ad_details['ad_type'] = None
-
-                # Extract company ID from the page
-                try:
-                    company_link_selector = 'a[href*="/company/"]'
-                    company_link = await page.query_selector(company_link_selector)
-                    if company_link:
-                        href = await company_link.get_attribute('href')
-                        company_id_match = re.search(r'/company/(\d+)', href)
-                        if company_id_match:
-                            ad_details['company_id'] = company_id_match.group(1)
+                async def handle_response(response):
+                    nonlocal total_size, response_count
+                    try:
+                        if response.request.resource_type in metrics['timing']:
+                            metrics['timing'][response.request.resource_type] += 1
                         else:
-                            ad_details['company_id'] = self.company_id
-                    else:
-                        ad_details['company_id'] = self.company_id
-                except Exception as e:
-                    self.logger.debug(f"Failed to extract company ID: {str(e)}")
-                    ad_details['company_id'] = self.company_id  # Fallback to initialized company_id
+                            metrics['timing'][response.request.resource_type] = 1
+                        
+                        headers = response.headers
+                        if 'content-length' in headers:
+                            size = int(headers['content-length'])
+                            total_size += size
+                            response_count += 1
+                    except Exception as e:
+                        self.logger.debug(f"Error tracking metrics: {str(e)}")
 
-                # Extract creative content
-                try:
-                    # Headline
-                    headline_selector = '.headline'
-                    headline = await page.eval_on_selector(headline_selector, 'el => el.innerText')
-                    ad_details['headline'] = clean_text(headline)
-                except Exception:
-                    ad_details['headline'] = clean_text(None)
+                page.on('response', handle_response)
 
-                # Description/text content
-                try:
-                    description_selector = '.commentary__content, .ad-library-preview-creative-text'
-                    description = await page.eval_on_selector(description_selector, 'el => el.innerText')
-                    ad_details['text_content'] = clean_text(description)
-                except Exception:
-                    ad_details['text_content'] = clean_text(None)
+                # Use a more reliable navigation strategy
+                response = await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=NAVIGATION_TIMEOUT
+                )
 
-                # Extract image URL
-                try:
-                    img_selector = 'img.ad-preview__dynamic-dimensions-image'
-                    img_elem = await page.query_selector(img_selector)
-                    if img_elem:
-                        ad_details['image_url'] = await img_elem.get_attribute('src')
-                except Exception:
-                    ad_details['image_url'] = None
+                duration = (datetime.now() - start_time).total_seconds()
+                metrics['duration'] = duration
+                metrics['size_mb'] = total_size / (1024 * 1024)
+                metrics['resources'] = response_count
 
-                # Extract redirect URL and UTM parameters
-                try:
-                    link_selector = 'a[data-tracking-control-name="ad_library_ad_preview_headline_content"]'
-                    link_elem = await page.query_selector(link_selector)
-                    if link_elem:
-                        full_url = await link_elem.get_attribute('href')
-                        url_parts = full_url.split('?')
-                        ad_details['redirect_url'] = url_parts[0]
-                        ad_details['utm_parameters'] = url_parts[1] if len(url_parts) > 1 else None
-                except Exception:
-                    ad_details['redirect_url'] = None
-                    ad_details['utm_parameters'] = None
+                self.logger.info(
+                    f"Page load metrics for {url}:\n"
+                    f"- Duration: {duration:.2f}s\n"
+                    f"- Size: {metrics['size_mb']:.2f}MB\n"
+                    f"- Resources: {response_count}\n"
+                    f"- Resource types: {dict(metrics['timing'])}"
+                )
 
-                # Extract demographics (using existing method)
-                ad_details['demographics'] = await self._extract_demographics(page)
+                if response.status == 429:  # Rate limit
+                    await asyncio.sleep(30)  # Longer cooldown
+                    continue
+                    
+                if not response.ok:
+                    self.logger.error(f"HTTP {response.status} on attempt {attempt + 1}")
+                    continue
 
-                return ad_details
-
+                # Add a small delay to ensure content is loaded
+                await asyncio.sleep(1)
+                
+                return await self._extract_page_content(page)
+                    
             except Exception as e:
-                retry_count += 1
-                if retry_count < RETRY_COUNT:
-                    self.logger.warning(f"Retry {retry_count}/{RETRY_COUNT} for URL {url}: {str(e)}")
-                    await asyncio.sleep(2)
-                else:
-                    self.logger.error(f"Failed to extract details from {url} after {RETRY_COUNT} retries: {str(e)}")
+                self.logger.error(f"Error on attempt {attempt + 1}: {str(e)}")
+                if attempt == RETRY_COUNT - 1:
+                    self.logger.error(f"Failed to process {url} after {RETRY_COUNT} attempts")
                     return None
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))  # Progressive delay
+                continue
+
+        return None
 
     async def _extract_demographics(self, page: Page) -> dict:
         """Helper method to extract demographics with error handling"""
@@ -367,3 +333,162 @@ class AsyncLinkedInCrawler:
         """Split URLs into chunks of specified size"""
         urls = list(urls)
         return [urls[i:i + size] for i in range(0, len(urls), size)]
+
+    async def process_chunk(self, chunk, pages):
+        tasks = []
+        for i, url in enumerate(chunk):
+            # Add progressive delay
+            delay = 2 + (i * 1)  # 2s, 3s, 4s, 5s
+            await asyncio.sleep(delay)
+            
+            page_index = i % len(pages)
+            task = asyncio.create_task(
+                self.extract_ad_details(
+                    pages[page_index],
+                    url,
+                    f"[Chunk {i+1}/{len(chunk)}]"
+                )
+            )
+            tasks.append(task)
+
+    async def _extract_page_content(self, page: Page) -> dict:
+        """Extract detailed ad content from the page"""
+        try:
+            await page.wait_for_load_state('networkidle')
+            ad_data = {}
+            
+            # Get the page HTML
+            html_content = await page.content()
+            
+            # Extract Ad ID
+            ad_id_match = re.search(r'<link rel="canonical" href="/ad-library/detail/(\d+)">', html_content)
+            if not ad_id_match:
+                self.logger.warning('Ad ID not found, skipping ad.')
+                return None
+            ad_data['ad_id'] = ad_id_match.group(1)
+            
+            # Extract Campaign Dates
+            duration_match = re.search(r'<p class="about-ad__availability-duration[^"]*"[^>]*>([^<]*)</p>', html_content)
+            if duration_match:
+                duration_text = duration_match.group(1).strip()
+                date_range = re.search(r'Ran from (\w+ \d{1,2}, \d{4})(?:\s+to\s+(\w+ \d{1,2}, \d{4}))?', duration_text)
+                if date_range:
+                    ad_data['start_date'] = format_date(date_range.group(1))
+                    ad_data['end_date'] = format_date(date_range.group(2)) if date_range.group(2) else None
+
+            # Extract Total Impressions
+            impressions_match = re.search(r'<p[^>]*>Total Impressions</p>\s*<p[^>]*>([^<]*)</p>', html_content)
+            if impressions_match:
+                ad_data['total_impressions'] = impressions_match.group(1).strip()
+
+            # Extract Country Impressions
+            country_impressions = []
+            country_pattern = r'<span class="ad-analytics__country-impressions[^"]*"[^>]*aria-label="([^"]+), impressions ([^%]+%)"[^>]*>'
+            for match in re.finditer(country_pattern, html_content):
+                country_impressions.append({
+                    'country': match.group(1),
+                    'percentage': match.group(2)
+                })
+            ad_data['country_impressions'] = country_impressions
+
+            # Extract Advertiser Info
+            logo_match = re.search(r'<img[^>]*data-delayed-url="([^"]+)"[^>]*alt="advertiser logo"[^>]*>', html_content)
+            if logo_match:
+                ad_data['advertiser_logo_url'] = logo_match.group(1)
+
+            advertiser_match = re.search(r'<a[^>]*href="https://www\.linkedin\.com/(?:company|in)/[^"]+"[^>]*>\s*([^<]+)\s*</a>', html_content)
+            if advertiser_match:
+                ad_data['advertiser_name'] = advertiser_match.group(1).strip()
+
+            # Extract Creative Type
+            creative_match = re.search(r'<div[^>]*data-creative-type="([^"]+)"[^>]*>', html_content)
+            if creative_match:
+                ad_data['creative_type'] = creative_match.group(1)
+
+            # Determine Ad Type
+            ad_data['ad_type'] = 'personal_ad' if 'linkedin.com/in/' in html_content else 'company_ad'
+
+            # Extract Redirect URL and UTM
+            redirect_match = re.search(r'<a[^>]*href="([^"]+)"[^>]*data-tracking-control-name="ad_library_ad_preview_headline_content"[^>]*>', html_content)
+            if redirect_match:
+                full_url = redirect_match.group(1)
+                url_parts = full_url.split('?')
+                ad_data['redirect_url'] = url_parts[0]
+                ad_data['utm_parameters'] = url_parts[1] if len(url_parts) > 1 else None
+
+            # Extract Content
+            headline_match = re.search(r'<h1[^>]*class="headline"[^>]*>([^<]+)</h1>', html_content)
+            if headline_match:
+                ad_data['headline'] = headline_match.group(1).strip()
+
+            description_match = re.search(r'<p[^>]*class="[^"]*commentary__content[^"]*"[^>]*>([\s\S]*?)</p>', html_content)
+            if description_match:
+                ad_data['description'] = clean_text(description_match.group(1).strip())
+            else:
+                self.logger.warning(f"Description not found for adId: {ad_data.get('ad_id')}")
+                ad_data['description'] = 'No description available.'
+
+            # Extract Image URL
+            img_match = re.search(r'<img[^>]*class="[^"]*ad-preview__dynamic-dimensions-image[^"]*"[^>]*src="([^"]+)"', html_content)
+            if img_match:
+                ad_data['image_url'] = img_match.group(1).replace('&amp;', '&')
+
+            # Extract Company ID
+            company_match = re.search(r'<a[^>]*href="https://www\.linkedin\.com/company/(\d+)"[^>]*>', html_content)
+            if company_match:
+                ad_data['company_id'] = company_match.group(1)
+
+            return ad_data
+
+        except Exception as e:
+            self.logger.error(f"Error in content extraction: {str(e)}")
+            return None
+
+    # Add request filtering
+    async def _filter_requests(self, route):
+        """Filter out unnecessary resources to reduce page load size"""
+        request = route.request
+        resource_type = request.resource_type
+        url = request.url.lower()
+
+        # Always allow main document and essential ad content
+        if resource_type == "document" or "ad-library" in url:
+            await route.continue_()
+            return
+
+        # Block specific resource types
+        if resource_type in ["media", "video", "font"]:
+            await route.abort()
+            return
+
+        # Block large image formats
+        if resource_type == "image" and any(ext in url for ext in ['.gif', '.webp']):
+            await route.abort()
+            return
+
+        # Block non-essential scripts and stylesheets
+        if resource_type in ["script", "stylesheet"] and not any(
+            essential in url for essential in [
+                "ad-library",
+                "essential",
+                "core"
+            ]
+        ):
+            await route.abort()
+            return
+
+        # Block tracking and analytics
+        if any(pattern in url for pattern in [
+            "analytics",
+            "tracking",
+            "metrics",
+            "telemetry",
+            "logging",
+            "pixel",
+            "beacon"
+        ]):
+            await route.abort()
+            return
+
+        # Allow everything else
+        await route.continue_()
