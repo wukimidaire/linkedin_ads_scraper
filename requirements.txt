@@ -1,8 +1,5 @@
 fastapi==0.104.1
 uvicorn==0.24.0
-playwright>=1.39.0
+playwright==1.39.0
 pydantic==2.4.2
 emoji>=2.2.0
-python-dotenv>=1.0.0
-asyncio>=3.4.3
-logging>=0.5.1.2
