@@ -16,16 +16,13 @@
 
 A high-performance web crawler that helps businesses and researchers analyze advertising strategies on LinkedIn by automatically collecting and analyzing ads from LinkedIn's Ad Library. Built with FastAPI and Playwright, this tool provides valuable competitive intelligence and market research data.
 
-
-**Tech Stack**: Python, FastAPI, Playwright, Docker, CI/CD
+**Tech Stack**: Python, FastAPI, Playwright, Docker, PostgreSQL
 
 **Key Features**:
-
   - Automated collection of LinkedIn Ad Library data
-    
   - Asynchronous crawling with parallel processing
-
-
+  - Structured data storage in PostgreSQL
+  - RESTful API endpoints for data access
 
 ### 🎯 Problem Statement
 
@@ -33,8 +30,8 @@ LinkedIn's Ad Library contains valuable insights about how companies advertise o
 
 - 🤖 Collecting ads from any company's LinkedIn Ad Library
 - 📊 Extracting detailed metrics and creative content
-- 🗃️ Organizing data in a structured JSON format
-- 🔌 Providing an API endpoint for easy integration
+- 🗃️ Organizing data in a structured format in PostgreSQL
+- 🔌 Providing API endpoints for easy integration
 
 ## ✨ Key Features
 
@@ -52,14 +49,59 @@ LinkedIn's Ad Library contains valuable insights about how companies advertise o
 - 🛡️ Rate limiting and retry mechanisms
 - 📝 Detailed logging system
 - 🐳 Docker containerization
-- ☁️ Cloud-ready deployment
+- 🗄️ PostgreSQL database integration
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 - Python 3.8+
 - Docker (for containerized deployment)
-- Google Cloud SDK (for cloud deployment)
+- PostgreSQL
+- Git
+
+### Required Files Setup
+
+Before starting, you need to create the following files that are not included in the repository:
+
+1. Create `.env` file in the root directory:
+
+```
+# Database Configuration
+POSTGRES_USER=your_username
+POSTGRES_PASSWORD=your_password
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=linkedin_ads
+
+# Environment
+ENVIRONMENT=development
+```
+
+2. Create `.gitignore` file in the root directory:
+```gitignore
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+```
 
 ### Installation
 
@@ -74,83 +116,86 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install Playwright browsers
+playwright install chromium
+playwright install-deps
 ```
 
-### Quick Start
+### Database Setup
 
+1. Create PostgreSQL database:
 ```bash
-# Run the application
-uvicorn app:app --reload
-
-# Access the API
-# Swagger UI: http://localhost:8080/docs
-# API endpoint: http://localhost:8080/crawl?company_id=[company-id]
+createdb linkedin_ads
 ```
 
-## 🌐 Deployment Options
-
-### Docker Deployment
-
+2. Verify database connection:
 ```bash
-# Build and run container
-docker build -t linkedin-crawler .
-docker run -p 8080:8080 linkedin-crawler
+psql -h localhost -U your_username -d linkedin_ads
 ```
 
-### Google Cloud Run Deployment
+3. The application will automatically create required tables on first run
 
-```bash
-# Configure Google Cloud SDK
-gcloud init
-gcloud auth configure-docker
-```
+## 🔐 Environment Variables Reference
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| POSTGRES_USER | Database username | - | Yes |
+| POSTGRES_PASSWORD | Database password | - | Yes |
+| POSTGRES_HOST | Database host | localhost | Yes |
+| POSTGRES_PORT | Database port | 5432 | Yes |
+| POSTGRES_DB | Database name | linkedin_ads | Yes |
+| ENVIRONMENT | Deployment environment | development | No |
+
+## 🌐 API Endpoints
+
+### Available Endpoints
+
+1. **Root Endpoint**
+   - GET `/`: Welcome message and API status
+
+2. **Crawler Endpoint**
+   - GET `/crawl?company_id={company_id}`: Start crawling ads for a specific company
+
+3. **Health Checks**
+   - GET `/health`: Check API and database health
+   - GET `/test-db`: Test database connection
+
+4. **Ad Management**
+   - GET `/check-ads/{company_id}`: Get all ads for a specific company
+   - GET `/check-ad/{ad_id}`: Get details of a specific ad
+   - GET `/list-ads/{company_id}`: List all ads with basic details for a company
 
 ## 🔧 Configuration
 
-### Environment Variables
-- `PORT`: Server port (default: 8080)
-- `LOG_LEVEL`: Logging level (default: INFO)
-- `MAX_CONCURRENT_PAGES`: Maximum parallel pages (default: 2)
+### Performance Settings
+- `MAX_CONCURRENT_PAGES`: Maximum parallel pages (default: 4)
+- `CHUNK_SIZE`: Batch size for processing (default: 4)
 - `RETRY_COUNT`: Number of retry attempts (default: 3)
+- `PAGE_TIMEOUT`: Page load timeout in ms (default: 30000)
 
 ### Resource Requirements
 - Memory: Minimum 2GB recommended
 - CPU: 2 cores recommended
-- Storage: Minimal (~500MB)
+- Storage: ~500MB for application, database size varies with data
 
-## 📊 Example Output
+## 🐳 Docker Deployment
 
-The crawler returns structured JSON data containing ad details:
+```bash
+# Build container
+docker build -t linkedin-crawler .
 
+# Run container
+docker run -p 8080:8080 \
+  --env-file .env \
+  linkedin-crawler
+```
 
-json
-{
-"adId": "123456789",
-"advertiserName": "Company Name",
-"startDate": "2024/01/01",
-"endDate": "2024/01/31",
-"totalImpressionsRange": "10k-50k",
-"countryImpressions": [...],
-"demographics": {...},
-"creativeContent": {...}
-}
+## ⚠️ Disclaimer
 
+This tool is for research purposes only. Ensure compliance with LinkedIn's terms of service and rate limiting policies when using this crawler.
 
-## 🔐 Security & Rate Limiting
-
-- Built-in rate limiting to prevent API abuse
-- Request filtering for optimal performance
-- Browser isolation in containerized environment
-- Automatic retry mechanism for failed requests
-
-## 📝 Logging & Monitoring
-
-- Structured logging with timestamp and severity levels
-- Automatic integration with Google Cloud Logging
-- Performance metrics tracking
-- Error tracking and reporting
-
-## 🤝 Contributing
+## 📄 Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -158,10 +203,9 @@ json
 4. Push to the branch
 5. Create a Pull Request
 
-## ⚠️ Disclaimer
+## 📄 License
 
 This tool is for research purposes only. Ensure compliance with LinkedIn's terms of service and rate limiting policies when using this crawler.
-
 
 ## 📄 MIT License
 

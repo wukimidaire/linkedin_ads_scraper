@@ -1,37 +1,40 @@
 FROM python:3.9-slim
 
-# Set the working directory
-WORKDIR /app
-
-# Install system dependencies
+# Install system dependencies required for Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
-    xvfb \
+    libgconf-2-4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
     libgbm1 \
-    libnss3 \
-    libxss1 \
     libasound2 \
-    libxtst6 \
-    && apt-get clean \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libnspr4 \
+    libnss3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python packages
+# Set working directory
+WORKDIR /app
+
+# Copy requirements and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install playwright browsers and dependencies
-RUN playwright install chromium --with-deps
+# Install Playwright browsers
+RUN playwright install chromium
+RUN playwright install-deps
 
-# Set up virtual display
-ENV DISPLAY=:99
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-
-# Copy application code
+# Copy your application code
 COPY . .
 
-# Set environment variables
-ENV PORT=8080
-
-# Modify the CMD to use xvfb-run
-CMD ["sh", "-c", "xvfb-run --server-args='-screen 0 1280x800x24' uvicorn app:app --host 0.0.0.0 --port $PORT"]
+# Command to run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

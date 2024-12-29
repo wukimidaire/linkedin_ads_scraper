@@ -2,22 +2,25 @@ from playwright.async_api import Page
 import logging
 import asyncio
 from .config import (
-    SCROLL_WAIT_TIME,
-    NETWORK_IDLE_TIMEOUT,
-    MAX_CONSECUTIVE_UNCHANGED,
-    RETRY_COUNT,
-    PAGE_TIMEOUT,
-    NAVIGATION_TIMEOUT,
+    crawler_config,
+    browser_config,
     MAX_CONCURRENT_PAGES,
-    CHUNK_SIZE,
-    RETRY_DELAY,
     VIEWPORT_CONFIG,
-    USER_AGENT
+    USER_AGENT,
+    RETRY_COUNT,
+    RETRY_DELAY,
+    NAVIGATION_TIMEOUT,
+    CHUNK_SIZE
 )
 from .utils import clean_text, clean_percentage, format_date
 from src.logger import setup_logger
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
+from sqlalchemy.orm import Session
+from src.models import LinkedInAd
+
+logger = setup_logger("crawler", "DEBUG")
 
 class AsyncLinkedInCrawler:
     def __init__(self, company_id: str, max_requests: int = 50):
@@ -27,8 +30,19 @@ class AsyncLinkedInCrawler:
         self.logger = setup_logger("crawler")
         self.consecutive_timeouts = 0
         self.max_consecutive_timeouts = 3
+        # Add performance metrics
+        self.metrics = {
+            'start_time': None,
+            'url_collection_time': None,
+            'processing_times': [],
+            'failed_urls': set(),
+            'success_rate': 0,
+            'avg_processing_time': 0
+        }
 
     async def collect_ad_urls(self, page: Page) -> None:
+        """Collect all ad URLs from the page"""
+        self.metrics['start_time'] = time.time()
         self.logger.info("Starting URL collection")
         previous_links_count = 0
         consecutive_unchanged_counts = 0
@@ -44,24 +58,21 @@ class AsyncLinkedInCrawler:
         while True:
             self.logger.debug(f"Scroll iteration {scroll_count}")
             
-            # Get current scroll height
+            # Get current scroll height and scroll
             current_height = await page.evaluate('document.body.scrollHeight')
             
-            # Break if we've reached the bottom and no new content loaded
             if current_height == last_height:
                 consecutive_unchanged_counts += 1
             else:
                 consecutive_unchanged_counts = 0
                 last_height = current_height
 
-            # Scroll with more sophisticated approach
             try:
                 await page.evaluate('''() => {
                     window.scrollTo({
                         top: document.body.scrollHeight,
                         behavior: 'instant'
                     });
-                    // Trigger any lazy loading
                     window.dispatchEvent(new Event('scroll'));
                 }''')
                 
@@ -125,117 +136,139 @@ class AsyncLinkedInCrawler:
                 self.logger.warning("Reached maximum scroll count")
                 break
 
-    async def process_all_ads(self, page: Page) -> list:
-        all_ad_details = []
+        self.metrics['url_collection_time'] = time.time() - self.metrics['start_time']
+        self.logger.info(f"URL collection took {self.metrics['url_collection_time']:.2f} seconds")
+
+    async def process_all_ads(self, page: Page, db: Session) -> list:
+        """Process all collected ad URLs and save them to the database in chunks"""
+        processing_start = time.time()
         total_ads = len(self.detail_urls)
         start_time = datetime.now()
+        processed_count = 0
         
-        self.logger.info(f"Starting parallel processing of {total_ads} ads with {MAX_CONCURRENT_PAGES} concurrent pages")
+        self.logger.info(f"Starting parallel processing of {total_ads} ads")
         
         try:
-            # Create multiple browser contexts
             browser = page.context.browser
             contexts = []
             pages = []
             
             # Initialize parallel contexts
-            self.logger.debug(f"Initializing {MAX_CONCURRENT_PAGES} browser contexts")
             for i in range(MAX_CONCURRENT_PAGES):
-                try:
-                    context = await browser.new_context(
-                        viewport=VIEWPORT_CONFIG,
-                        user_agent=USER_AGENT
-                    )
-                    contexts.append(context)
-                    pages.append(await context.new_page())
-                    self.logger.debug(f"Context {i+1}/{MAX_CONCURRENT_PAGES} initialized successfully")
-                except Exception as e:
-                    self.logger.error(f"Failed to initialize context {i+1}: {str(e)}")
-                    raise
+                context = await browser.new_context(
+                    viewport=VIEWPORT_CONFIG,
+                    user_agent=USER_AGENT
+                )
+                contexts.append(context)
+                pages.append(await context.new_page())
 
             # Process URLs in chunks
             url_chunks = [list(urls) for urls in self._chunk_urls(self.detail_urls, CHUNK_SIZE)]
-            total_chunks = len(url_chunks)
-            self.logger.info(f"Split {total_ads} URLs into {total_chunks} chunks of size {CHUNK_SIZE}")
             
             for chunk_index, url_chunk in enumerate(url_chunks):
-                chunk_start_time = datetime.now()
-                self.logger.info(f"Processing chunk {chunk_index + 1}/{total_chunks} with {len(url_chunk)} URLs")
-                
+                chunk_start = time.time()
+                self.logger.info(f"Processing chunk {chunk_index + 1}/{len(url_chunks)}")
                 tasks = []
                 for i, url in enumerate(url_chunk):
                     page_index = i % len(pages)
-                    self.logger.debug(f"Creating task for URL {url} using page {page_index + 1}")
                     task = asyncio.create_task(
                         self.extract_ad_details(
                             pages[page_index],
                             url,
-                            f"[Chunk {chunk_index + 1}/{total_chunks}]"
+                            f"[Chunk {chunk_index + 1}/{len(url_chunks)}]"
                         )
                     )
                     tasks.append(task)
-                
+
                 # Process chunk in parallel
-                try:
-                    chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    successful_results = []
-                    
-                    for i, result in enumerate(chunk_results):
-                        if isinstance(result, Exception):
-                            error_msg = str(result)
-                            if "Timeout" in error_msg:
-                                self.consecutive_timeouts += 1
-                                self.logger.warning(f"Timeout error {self.consecutive_timeouts}/3")
-                                if self.consecutive_timeouts >= self.max_consecutive_timeouts:
-                                    self.logger.error("Maximum consecutive timeouts reached. Stopping processing.")
-                                    return all_ad_details
-                            else:
-                                self.consecutive_timeouts = 0
-                            self.logger.error(f"Failed to process URL {url_chunk[i]}: {error_msg}")
-                        elif result:
-                            self.consecutive_timeouts = 0
-                            successful_results.append(result)
-                    
-                    all_ad_details.extend(successful_results)
-                    
-                    chunk_duration = (datetime.now() - chunk_start_time).total_seconds()
-                    self.logger.info(
-                        f"Chunk {chunk_index + 1}/{total_chunks} completed: "
-                        f"{len(successful_results)}/{len(url_chunk)} successful in {chunk_duration:.2f}s"
-                    )
-                    
-                except Exception as e:
-                    self.logger.error(f"Error processing chunk {chunk_index + 1}: {str(e)}")
+                chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Filter out errors and collect ad details
+                successful_ads = []
+                for result in chunk_results:
+                    if isinstance(result, Exception):
+                        self.logger.error(f"Failed to process URL: {str(result)}")
+                    elif result:
+                        successful_ads.append(result)
+                
+                # Save chunk to database
+                if successful_ads:
+                    try:
+                        ad_objects = []
+                        for ad in successful_ads:
+                            try:
+                                ad_obj = LinkedInAd(
+                                    ad_id=ad['ad_id'],
+                                    creative_type=ad.get('creative_type'),
+                                    advertiser_name=ad.get('advertiser_name'),
+                                    advertiser_logo=ad.get('advertiser_logo_url'),
+                                    headline=ad.get('headline'),
+                                    description=ad.get('description'),
+                                    promoted_text=ad.get('promoted_text'),
+                                    image_url=ad.get('image_url'),
+                                    view_details_link=ad.get('url'),
+                                    campaign_start_date=datetime.strptime(ad['start_date'], '%Y/%m/%d').date() if ad.get('start_date') else None,
+                                    campaign_end_date=datetime.strptime(ad['end_date'], '%Y/%m/%d').date() if ad.get('end_date') else None,
+                                    campaign_impressions_range=ad.get('total_impressions'),
+                                    campaign_impressions_by_country=ad.get('country_impressions'),
+                                    company_id=self.company_id,  # Use the company_id from the constructor
+                                    ad_type=ad.get('ad_type'),
+                                    ad_redirect_url=ad.get('redirect_url'),
+                                    utm_parameters=ad.get('utm_parameters')
+                                )
+                                ad_objects.append(ad_obj)
+                            except Exception as e:
+                                self.logger.error(f"Error creating ad object: {str(e)}")
+                                continue
+
+                        if ad_objects:
+                            db.bulk_save_objects(ad_objects, update_changed_only=True)
+                            db.commit()
+                            processed_count += len(ad_objects)
+                            self.logger.info(f"Saved {len(ad_objects)} ads from chunk {chunk_index + 1} to database. Total processed: {processed_count}/{total_ads}")
+                    except Exception as e:
+                        self.logger.error(f"Error saving chunk {chunk_index + 1} to database: {str(e)}")
+                        db.rollback()
                 
                 # Add delay between chunks
-                if chunk_index > 0:
-                    self.logger.debug(f"Waiting {RETRY_DELAY * 2}s between chunks to avoid rate limiting")
-                    await asyncio.sleep(RETRY_DELAY * 2)
+                if chunk_index < len(url_chunks) - 1:
+                    await asyncio.sleep(RETRY_DELAY)
 
-        except Exception as e:
-            self.logger.error(f"Fatal error during parallel processing: {str(e)}", exc_info=True)
-            return all_ad_details
-        
+                # Track chunk processing time
+                chunk_time = time.time() - chunk_start
+                self.metrics['processing_times'].append(chunk_time)
+                
+                if isinstance(result, Exception):
+                    self.metrics['failed_urls'].add(url)
+                
+            # Calculate final metrics
+            total_time = time.time() - processing_start
+            self.metrics['success_rate'] = ((total_ads - len(self.metrics['failed_urls'])) / total_ads) * 100
+            self.metrics['avg_processing_time'] = sum(self.metrics['processing_times']) / len(self.metrics['processing_times'])
+            
+            self.logger.info(
+                f"\nPerformance Metrics:\n"
+                f"- Total Processing Time: {total_time:.2f}s\n"
+                f"- Average Chunk Processing Time: {self.metrics['avg_processing_time']:.2f}s\n"
+                f"- Success Rate: {self.metrics['success_rate']:.1f}%\n"
+                f"- Failed URLs: {len(self.metrics['failed_urls'])}\n"
+                f"- URL Collection Time: {self.metrics['url_collection_time']:.2f}s"
+            )
+
         finally:
             # Cleanup
-            self.logger.debug("Cleaning up browser contexts")
-            for i, context in enumerate(contexts):
-                try:
-                    await context.close()
-                    self.logger.debug(f"Context {i+1} closed successfully")
-                except Exception as e:
-                    self.logger.error(f"Error closing context {i+1}: {str(e)}")
-        
-        # Final statistics
+            for context in contexts:
+                await context.close()
+
         total_duration = (datetime.now() - start_time).total_seconds()
-        success_rate = (len(all_ad_details) / total_ads) * 100
+        success_rate = (processed_count / total_ads) * 100 if total_ads > 0 else 0
         
         self.logger.info(
-            f"Processing complete: {len(all_ad_details)}/{total_ads} ads processed successfully "
+            f"Processing complete: {processed_count}/{total_ads} ads processed "
             f"({success_rate:.1f}%) in {total_duration:.2f}s"
         )
         
-        return all_ad_details
+        return processed_count
 
     async def extract_ad_details(self, page: Page, url: str, progress: str = "") -> dict:
         """Extract details from a single ad page"""
