@@ -1,9 +1,24 @@
-FROM python:3.9-slim
+# Build stage
+FROM python:3.9-slim as builder
 
-# Install system dependencies required for Playwright
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Runtime stage
+FROM python:3.9-slim
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.9/site-packages/ /usr/local/lib/python3.9/site-packages/
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
     libgconf-2-4 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
@@ -22,19 +37,11 @@ RUN apt-get update && apt-get install -y \
     libnss3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
-
-# Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
 
 # Install Playwright browsers
 RUN playwright install chromium
 RUN playwright install-deps
 
-# Copy your application code
-COPY . .
-
-# Command to run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

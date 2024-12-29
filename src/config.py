@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str
+    CLOUD_SQL_INSTANCE: str | None = None  # Make it optional
     
     # Environment settings
     ENVIRONMENT: str = "development"
