@@ -32,7 +32,8 @@ def get_database_url():
         
         # Fallback to Cloud SQL instance if configured
         if CLOUD_SQL_INSTANCE:
-            return f"postgresql://{DB_USER}:{DB_PASSWORD}@{CLOUD_SQL_INSTANCE}/{DB_NAME}"
+            # Correct format for Cloud SQL connection
+            return f"postgresql://{DB_USER}:{DB_PASSWORD}@localhost/{DB_NAME}?host=/cloudsql/{CLOUD_SQL_INSTANCE}"
         raise Exception("No valid database connection available")
 
 # Database URL and engine configuration
