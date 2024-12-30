@@ -48,5 +48,10 @@ RUN python -m playwright install-deps
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 
-# Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Create a non-root user
+RUN useradd -m -u 1000 appuser
+RUN chown -R appuser:appuser /app
+USER appuser
+
+# Command to run the application with increased timeout
+CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --timeout-keep-alive 75 --timeout 120

@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, HTTPException, Depends
 from playwright.async_api import async_playwright
 from playwright.async_api import Error as PlaywrightError
@@ -18,7 +19,10 @@ from src.config import browser_config, crawler_config, log_config, get_settings
 # Initialize database
 init_db()
 
-app = FastAPI()
+# Get port from environment variable
+port = int(os.getenv("PORT", "8080"))
+
+app = FastAPI(title="LinkedIn Ads Crawler")
 logger = setup_logger("linkedin_crawler")
 
 # Access browser settings
