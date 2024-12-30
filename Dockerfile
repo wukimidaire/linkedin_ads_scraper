@@ -40,8 +40,13 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY . .
 
-# Install Playwright browsers
-RUN playwright install chromium
-RUN playwright install-deps
+# Install Playwright using python -m
+RUN python -m playwright install chromium
+RUN python -m playwright install-deps
 
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
+
+# Command to run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
