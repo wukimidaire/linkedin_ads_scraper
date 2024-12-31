@@ -2,55 +2,43 @@ from datetime import datetime
 import re
 import emoji
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 import os
 from dotenv import load_dotenv
 import asyncio
 from .models import LinkedInAd
-from .database import SessionLocal, engine, Base
+from .database import AsyncSessionLocal, engine, Base
 from .config import VIEWPORT_CONFIG, USER_AGENT, NAVIGATION_TIMEOUT
 
 # Load environment variables if not already done
 load_dotenv()
 
-def init_db():
+async def init_db():
     """Initialize database and tables"""
     try:
         # Import all models to ensure they're registered with SQLAlchemy
         from src.models import LinkedInAd, Base
         
-        # Create all tables
-        Base.metadata.create_all(bind=engine)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
         print("Database tables created successfully!")
         
         # Test the connection
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
             print("Database connection verified!")
             
     except Exception as e:
         print(f"Error initializing database: {str(e)}")
 
-# Database dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        # Test the connection
-        db.execute(text("SELECT 1"))
-        yield db
-    finally:
-        db.close()
-
-# Add these database-related functions if not present
-def close_db():
+async def close_db():
     """Close database connection"""
-    engine.dispose()
+    await engine.dispose()
 
 def clean_text(text: str) -> str:
     """Clean and normalize text content"""
     if not text:
         return ""
-    # Remove HTML tags, extra whitespace, and normalize
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
@@ -103,11 +91,11 @@ async def setup_browser_context(playwright):
     
     return browser, context
 
-async def batch_upsert_ads(ads: list, db: Session, batch_size: int = 100):
+async def batch_upsert_ads(ads: list, db: AsyncSession, batch_size: int = 100):
     """Batch process ad insertions/updates"""
     for i in range(0, len(ads), batch_size):
         batch = ads[i:i + batch_size]
         ad_objects = [LinkedInAd(**ad) for ad in batch]
-        db.bulk_save_objects(ad_objects, update_changed_only=True)
+        db.add_all(ad_objects)
         await asyncio.sleep(0.1)  # Prevent overwhelming the database
-    db.commit()
+    await db.commit()

@@ -1,9 +1,11 @@
 import logging
 import sys
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Union, Callable, Any
 from functools import wraps
+from playwright.async_api import Error as PlaywrightError
 
 def setup_logger(name: str, log_level: Union[str, int] = "INFO") -> logging.Logger:
     """Set up and return a logger instance"""
@@ -39,6 +41,7 @@ def setup_logger(name: str, log_level: Union[str, int] = "INFO") -> logging.Logg
 
 def handle_crawler_errors(retries: int = 3):
     def decorator(func: Callable) -> Callable:
+        logger = logging.getLogger(__name__)
         @wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
             for attempt in range(retries):

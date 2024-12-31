@@ -38,8 +38,6 @@ steps:
   - '--allow-unauthenticated'
   - '--port'
   - '8080'
-  - '--set-env-vars'
-  - 'PORT=8080'
   - '--memory'
   - '2Gi'
   - '--add-cloudsql-instances'

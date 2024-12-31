@@ -232,3 +232,136 @@ SOFTWARE.
 - Create an issue for bug reports or feature requests
 - Check existing issues before creating new ones
 - Include relevant details and error logs in bug reports
+
+
+
+
+Here's a checklist for deploying to Cloud Run, broken down into prerequisites and # LinkedIn Ad Crawler
+
+## Prerequisites
+
+### Local Development
+
+1. **Test Application Locally**
+   ```bash
+   uvicorn main:app --reload
+   ```
+
+2. **Test Database Connections**
+   ```bash
+   python -c "from src.utils import init_db; import asyncio; asyncio.run(init_db())"
+   ```
+
+### Docker Testing
+
+1. **Build Locally**
+   ```bash
+   docker build -t linkedin-ad-crawler .
+   ```
+
+2. **Run Locally**
+   ```bash
+   docker run -p 8080:8080 --env-file .env linkedin-ad-crawler
+   ```
+
+### Required Files
+
+- `Dockerfile` 
+- `cloudbuild.yaml` 
+- `requirements.txt` 
+- `.env.yaml` 
+
+## Deployment Steps
+
+### Setup Google Cloud CLI
+
+1. **Install and Initialize gcloud**
+   ```bash
+   gcloud init
+   gcloud auth login
+   gcloud config set project YOUR_PROJECT_ID
+   ```
+
+2. **Enable Required APIs**
+   ```bash
+   gcloud services enable \
+     cloudbuild.googleapis.com \
+     run.googleapis.com \
+     secretmanager.googleapis.com \
+     cloudresourcemanager.googleapis.com
+   ```
+
+3. **Set Up Secrets**
+   ```bash
+   gcloud secrets create POSTGRES_USER --data-file=- <<< "your-username"
+   gcloud secrets create POSTGRES_PASSWORD --data-file=- <<< "your-password"
+   gcloud secrets create POSTGRES_HOST --data-file=- <<< "your-host"
+   gcloud secrets create POSTGRES_DB --data-file=- <<< "your-db-name"
+   ```
+
+### Deploy
+
+1. **Using Cloud Build**
+   ```bash
+   gcloud builds submit --config cloudbuild.yaml
+   ```
+
+2. **Or Direct to Cloud Run**
+   ```bash
+   gcloud run deploy linkedin-ad-crawler \
+     --image gcr.io/$PROJECT_ID/linkedin-ad-crawler \
+     --platform managed \
+     --region europe-west1 \
+     --allow-unauthenticated
+   ```
+
+## Common Issues to Check
+
+### Database Connectivity
+
+- Ensure your database allows connections from Cloud Run IP range.
+- Add this to your PostgreSQL config:
+  ```
+  host    all             all             0.0.0.0/0               md5
+  ```
+
+### Environment Variables
+
+- `.env.yaml` should look like:
+  ```yaml
+  POSTGRES_USER: "user"
+  POSTGRES_PASSWORD: "pass"
+  POSTGRES_HOST: "host"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "dbname"
+  ```
+
+### IAM Permissions
+
+- Grant necessary permissions:
+  ```bash
+  gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+  ```
+
+### Network Configuration
+
+- If using Cloud SQL, create a connection:
+  ```bash
+  gcloud sql connections create vpc-connection \
+    --network=default \
+    --region=europe-west1
+  ```
+
+## Fix TypeError in `config.py`
+
+- Update the type hint to be compatible with Python 3.9:
+  ```python
+  from typing import Optional
+
+  class Settings(BaseSettings):
+      CLOUD_SQL_INSTANCE: Optional[str] = None
+  ```
+
+This updated `README.md` provides a clear guide for setting up and deploying your application, along with addressing the TypeError issue.

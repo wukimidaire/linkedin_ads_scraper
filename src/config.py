@@ -2,6 +2,7 @@ from datetime import datetime
 from functools import lru_cache
 from pydantic_settings import BaseSettings
 import logging
+from typing import Optional
 
 class BrowserConfig:
     """Browser-specific configuration settings"""
@@ -40,9 +41,9 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str
     POSTGRES_HOST: str
-    POSTGRES_PORT: int = 5432
+    POSTGRES_PORT: str = "5432"
     POSTGRES_DB: str
-    CLOUD_SQL_INSTANCE: str | None = None  # Make it optional
+    CLOUD_SQL_INSTANCE: Optional[str] = None  # Make it optional
     
     # Environment settings
     ENVIRONMENT: str = "development"

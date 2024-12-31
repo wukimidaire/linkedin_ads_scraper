@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 import time
 from sqlalchemy.orm import Session
 from src.models import LinkedInAd
+from src.utils import generate_linkedin_url
 
 logger = setup_logger("crawler", "DEBUG")
 
@@ -44,6 +45,18 @@ class AsyncLinkedInCrawler:
         """Collect all ad URLs from the page"""
         self.metrics['start_time'] = time.time()
         self.logger.info("Starting URL collection")
+        
+        # Generate and navigate to the LinkedIn Ad Library URL
+        url = generate_linkedin_url(self.company_id)
+        self.logger.info(f"Navigating to {url}")
+        
+        try:
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            self.logger.info("Successfully loaded the page")
+        except Exception as e:
+            self.logger.error(f"Failed to load page: {str(e)}")
+            return
+
         previous_links_count = 0
         consecutive_unchanged_counts = 0
         scroll_count = 0
@@ -139,10 +152,15 @@ class AsyncLinkedInCrawler:
         self.metrics['url_collection_time'] = time.time() - self.metrics['start_time']
         self.logger.info(f"URL collection took {self.metrics['url_collection_time']:.2f} seconds")
 
-    async def process_all_ads(self, page: Page, db: Session) -> list:
+    async def process_all_ads(self, page: Page, db: Session) -> int:
         """Process all collected ad URLs and save them to the database in chunks"""
         processing_start = time.time()
         total_ads = len(self.detail_urls)
+        
+        if total_ads == 0:
+            self.logger.warning("No ads found to process")
+            return 0
+        
         start_time = datetime.now()
         processed_count = 0
         
@@ -243,8 +261,10 @@ class AsyncLinkedInCrawler:
                 
             # Calculate final metrics
             total_time = time.time() - processing_start
-            self.metrics['success_rate'] = ((total_ads - len(self.metrics['failed_urls'])) / total_ads) * 100
-            self.metrics['avg_processing_time'] = sum(self.metrics['processing_times']) / len(self.metrics['processing_times'])
+            if total_ads > 0:
+                self.metrics['success_rate'] = ((total_ads - len(self.metrics['failed_urls'])) / total_ads) * 100
+                if self.metrics['processing_times']:
+                    self.metrics['avg_processing_time'] = sum(self.metrics['processing_times']) / len(self.metrics['processing_times'])
             
             self.logger.info(
                 f"\nPerformance Metrics:\n"
