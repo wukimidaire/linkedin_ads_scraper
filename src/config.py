@@ -6,14 +6,14 @@ from typing import Optional
 
 class BrowserConfig:
     """Browser-specific configuration settings"""
-    USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-    VIEWPORT = {'width': 1920, 'height': 1080}
-    PAGE_TIMEOUT = 30000  # 30 seconds
-    NAVIGATION_TIMEOUT = 15000  # 30 seconds
-    MAX_CONCURRENT_PAGES = 4
-    CHUNK_SIZE = 4
-    RETRY_COUNT = 3
-    RETRY_DELAY = 2  # seconds
+    USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    VIEWPORT = {'width': 1280, 'height': 800}  # Smaller viewport for better stability
+    PAGE_TIMEOUT = 60000  # Increased timeout
+    NAVIGATION_TIMEOUT = 60000  # Increased timeout
+    MAX_CONCURRENT_PAGES = 2  # Reduced concurrent pages
+    CHUNK_SIZE = 2  # Reduced chunk size
+    RETRY_COUNT = 5  # Increased retry count
+    RETRY_DELAY = 5  # Increased delay between retries
 
 class CrawlerConfig:
     """Crawler behavior configuration"""

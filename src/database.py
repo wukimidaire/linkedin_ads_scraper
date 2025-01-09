@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
+from typing import AsyncGenerator
 
 # Load environment variables
 load_dotenv()
@@ -56,11 +57,15 @@ except Exception as e:
     print(f"Failed to initialize database: {e}")
     raise
 
-async def get_db():
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Async database session dependency"""
     async with AsyncSessionLocal() as session:
         try:
             yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
         finally:
             await session.close()
 

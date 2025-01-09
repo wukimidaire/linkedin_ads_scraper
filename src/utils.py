@@ -9,6 +9,7 @@ import asyncio
 from .models import LinkedInAd
 from .database import AsyncSessionLocal, engine, Base
 from .config import VIEWPORT_CONFIG, USER_AGENT, NAVIGATION_TIMEOUT
+import time
 
 # Load environment variables if not already done
 load_dotenv()
@@ -75,17 +76,38 @@ def generate_linkedin_url(company_id: str) -> str:
 
 async def setup_browser_context(playwright):
     """Configure and return a new browser context with optimal settings"""
-    browser = await playwright.chromium.launch(headless=True)
+    browser = await playwright.chromium.launch(
+        headless=True,
+        args=[
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--disable-setuid-sandbox',
+            '--no-sandbox',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+        ]
+    )
+    
     context = await browser.new_context(
         viewport=VIEWPORT_CONFIG,
         user_agent=USER_AGENT,
         proxy=None,  # Add proxy support if needed
         java_script_enabled=True,
-        bypass_csp=True,  # Bypass Content Security Policy for better scraping
-        ignore_https_errors=True
+        bypass_csp=True,
+        ignore_https_errors=True,
+        extra_http_headers={
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
     )
     
-    # Add performance optimizations
+    # Block unnecessary resources
+    await context.route("**/*.{png,jpg,jpeg,gif,svg,css,font,woff,woff2}", 
+        lambda route: route.abort())
+    
     await context.set_default_timeout(NAVIGATION_TIMEOUT)
     await context.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
     
@@ -99,3 +121,14 @@ async def batch_upsert_ads(ads: list, db: AsyncSession, batch_size: int = 100):
         db.add_all(ad_objects)
         await asyncio.sleep(0.1)  # Prevent overwhelming the database
     await db.commit()
+
+class CrawlerMetrics:
+    def __init__(self):
+        self.start_time = time.time()
+        self.successful_requests = 0
+        self.failed_requests = 0
+        self.total_processing_time = 0
+        
+    def get_success_rate(self):
+        total = self.successful_requests + self.failed_requests
+        return (self.successful_requests / total * 100) if total > 0 else 0

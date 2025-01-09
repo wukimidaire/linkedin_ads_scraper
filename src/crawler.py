@@ -15,11 +15,14 @@ from .config import (
 from .utils import clean_text, clean_percentage, format_date
 from src.logger import setup_logger
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import time
 from sqlalchemy.orm import Session
 from src.models import LinkedInAd
 from src.utils import generate_linkedin_url
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+import json
 
 logger = setup_logger("crawler", "DEBUG")
 
@@ -51,11 +54,35 @@ class AsyncLinkedInCrawler:
         self.logger.info(f"Navigating to {url}")
         
         try:
-            await page.goto(url, wait_until='networkidle', timeout=30000)
+            # Change navigation strategy
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            
+            # Add additional wait for content
+            try:
+                await page.wait_for_selector("a[href*='/ad-library/detail/']", 
+                                           timeout=15000,
+                                           state='attached')
+            except Exception as e:
+                self.logger.warning(f"Initial content wait timeout: {str(e)}")
+                # Continue anyway as content might load later
+            
+            # Add a small delay to allow dynamic content to load
+            await asyncio.sleep(5)
+            
             self.logger.info("Successfully loaded the page")
         except Exception as e:
             self.logger.error(f"Failed to load page: {str(e)}")
-            return
+            # Add retry mechanism
+            for attempt in range(3):
+                try:
+                    self.logger.info(f"Retrying navigation (attempt {attempt + 1}/3)")
+                    await asyncio.sleep(5 * (attempt + 1))  # Exponential backoff
+                    await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+                    break
+                except Exception as retry_e:
+                    self.logger.error(f"Retry {attempt + 1} failed: {str(retry_e)}")
+                    if attempt == 2:  # Last attempt
+                        return
 
         previous_links_count = 0
         consecutive_unchanged_counts = 0
@@ -67,6 +94,9 @@ class AsyncLinkedInCrawler:
             await page.wait_for_selector("a[href*='/ad-library/detail/']", timeout=5000)
         except Exception as e:
             self.logger.warning(f"Initial content wait timeout: {str(e)}")
+
+        base_wait_time = 2  # Start with a 2-second wait time
+        increment = 1  # Increase wait time by 2 seconds after each scroll
 
         while True:
             self.logger.debug(f"Scroll iteration {scroll_count}")
@@ -90,7 +120,7 @@ class AsyncLinkedInCrawler:
                 }''')
                 
                 # Wait for potential new content
-                await asyncio.sleep(2)
+                await asyncio.sleep(base_wait_time + scroll_count * increment)
                 
                 # Check for new ads with more specific selector
                 links = await page.eval_on_selector_all(
@@ -119,7 +149,7 @@ class AsyncLinkedInCrawler:
             scroll_count += 1
 
             # More sophisticated exit conditions
-            if (consecutive_unchanged_counts >= 5 and scroll_count >= 3) or scroll_count >= 50:
+            if consecutive_unchanged_counts >= 5 and scroll_count >= 3:
                 # Double-check by scrolling back up and down
                 try:
                     await page.evaluate('window.scrollTo(0, 0)')
@@ -145,14 +175,14 @@ class AsyncLinkedInCrawler:
                 break
 
             # Prevent infinite loops
-            if scroll_count > 100:
+            if scroll_count >50:
                 self.logger.warning("Reached maximum scroll count")
                 break
 
         self.metrics['url_collection_time'] = time.time() - self.metrics['start_time']
         self.logger.info(f"URL collection took {self.metrics['url_collection_time']:.2f} seconds")
 
-    async def process_all_ads(self, page: Page, db: Session) -> int:
+    async def process_all_ads(self, page: Page, db: AsyncSession) -> int:
         """Process all collected ad URLs and save them to the database in chunks"""
         processing_start = time.time()
         total_ads = len(self.detail_urls)
@@ -163,6 +193,9 @@ class AsyncLinkedInCrawler:
         
         start_time = datetime.now()
         processed_count = 0
+        new_ads = 0
+        updated_ads = 0
+        existing_ads = 0
         
         self.logger.info(f"Starting parallel processing of {total_ads} ads")
         
@@ -185,80 +218,25 @@ class AsyncLinkedInCrawler:
             
             for chunk_index, url_chunk in enumerate(url_chunks):
                 chunk_start = time.time()
-                self.logger.info(f"Processing chunk {chunk_index + 1}/{len(url_chunks)}")
-                tasks = []
-                for i, url in enumerate(url_chunk):
-                    page_index = i % len(pages)
-                    task = asyncio.create_task(
-                        self.extract_ad_details(
-                            pages[page_index],
-                            url,
-                            f"[Chunk {chunk_index + 1}/{len(url_chunks)}]"
-                        )
-                    )
-                    tasks.append(task)
-
-                # Process chunk in parallel
-                chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Filter out errors and collect ad details
-                successful_ads = []
-                for result in chunk_results:
-                    if isinstance(result, Exception):
-                        self.logger.error(f"Failed to process URL: {str(result)}")
-                    elif result:
-                        successful_ads.append(result)
+                # Process chunk with retry mechanism
+                new, updated, existing = await self.process_chunk_with_retry(
+                    url_chunk, pages, db, chunk_index, len(url_chunks)
+                )
                 
-                # Save chunk to database
-                if successful_ads:
-                    try:
-                        ad_objects = []
-                        for ad in successful_ads:
-                            try:
-                                ad_obj = LinkedInAd(
-                                    ad_id=ad['ad_id'],
-                                    creative_type=ad.get('creative_type'),
-                                    advertiser_name=ad.get('advertiser_name'),
-                                    advertiser_logo=ad.get('advertiser_logo_url'),
-                                    headline=ad.get('headline'),
-                                    description=ad.get('description'),
-                                    promoted_text=ad.get('promoted_text'),
-                                    image_url=ad.get('image_url'),
-                                    view_details_link=ad.get('url'),
-                                    campaign_start_date=datetime.strptime(ad['start_date'], '%Y/%m/%d').date() if ad.get('start_date') else None,
-                                    campaign_end_date=datetime.strptime(ad['end_date'], '%Y/%m/%d').date() if ad.get('end_date') else None,
-                                    campaign_impressions_range=ad.get('total_impressions'),
-                                    campaign_impressions_by_country=ad.get('country_impressions'),
-                                    company_id=self.company_id,  # Use the company_id from the constructor
-                                    ad_type=ad.get('ad_type'),
-                                    ad_redirect_url=ad.get('redirect_url'),
-                                    utm_parameters=ad.get('utm_parameters')
-                                )
-                                ad_objects.append(ad_obj)
-                            except Exception as e:
-                                self.logger.error(f"Error creating ad object: {str(e)}")
-                                continue
-
-                        if ad_objects:
-                            db.bulk_save_objects(ad_objects, update_changed_only=True)
-                            db.commit()
-                            processed_count += len(ad_objects)
-                            self.logger.info(f"Saved {len(ad_objects)} ads from chunk {chunk_index + 1} to database. Total processed: {processed_count}/{total_ads}")
-                    except Exception as e:
-                        self.logger.error(f"Error saving chunk {chunk_index + 1} to database: {str(e)}")
-                        db.rollback()
-                
-                # Add delay between chunks
-                if chunk_index < len(url_chunks) - 1:
-                    await asyncio.sleep(RETRY_DELAY)
+                new_ads += new
+                updated_ads += updated
+                existing_ads += existing
+                processed_count += new + updated + existing
 
                 # Track chunk processing time
                 chunk_time = time.time() - chunk_start
                 self.metrics['processing_times'].append(chunk_time)
                 
-                if isinstance(result, Exception):
-                    self.metrics['failed_urls'].add(url)
-                
+                # Add delay between chunks
+                if chunk_index < len(url_chunks) - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+
             # Calculate final metrics
             total_time = time.time() - processing_start
             if total_ads > 0:
@@ -272,7 +250,10 @@ class AsyncLinkedInCrawler:
                 f"- Average Chunk Processing Time: {self.metrics['avg_processing_time']:.2f}s\n"
                 f"- Success Rate: {self.metrics['success_rate']:.1f}%\n"
                 f"- Failed URLs: {len(self.metrics['failed_urls'])}\n"
-                f"- URL Collection Time: {self.metrics['url_collection_time']:.2f}s"
+                f"- URL Collection Time: {self.metrics['url_collection_time']:.2f}s\n"
+                f"- New Ads: {new_ads}\n"
+                f"- Updated Ads: {updated_ads}\n"
+                f"- Existing Ads: {existing_ads}"
             )
 
         finally:
@@ -427,7 +408,7 @@ class AsyncLinkedInCrawler:
             # Get the page HTML
             html_content = await page.content()
             
-            # Extract Ad ID
+            # Extract Ad ID (primary key)
             ad_id_match = re.search(r'<link rel="canonical" href="/ad-library/detail/(\d+)">', html_content)
             if not ad_id_match:
                 self.logger.warning('Ad ID not found, skipping ad.')
@@ -440,13 +421,14 @@ class AsyncLinkedInCrawler:
                 duration_text = duration_match.group(1).strip()
                 date_range = re.search(r'Ran from (\w+ \d{1,2}, \d{4})(?:\s+to\s+(\w+ \d{1,2}, \d{4}))?', duration_text)
                 if date_range:
-                    ad_data['start_date'] = format_date(date_range.group(1))
-                    ad_data['end_date'] = format_date(date_range.group(2)) if date_range.group(2) else None
+                    # Use exact field names from PostgreSQL model
+                    ad_data['campaign_start_date'] = format_date(date_range.group(1))
+                    ad_data['campaign_end_date'] = format_date(date_range.group(2)) if date_range.group(2) else None
 
             # Extract Total Impressions
             impressions_match = re.search(r'<p[^>]*>Total Impressions</p>\s*<p[^>]*>([^<]*)</p>', html_content)
             if impressions_match:
-                ad_data['total_impressions'] = impressions_match.group(1).strip()
+                ad_data['campaign_impressions_range'] = impressions_match.group(1).strip()
 
             # Extract Country Impressions
             country_impressions = []
@@ -456,12 +438,12 @@ class AsyncLinkedInCrawler:
                     'country': match.group(1),
                     'percentage': match.group(2)
                 })
-            ad_data['country_impressions'] = country_impressions
+            ad_data['campaign_impressions_by_country'] = country_impressions
 
             # Extract Advertiser Info
             logo_match = re.search(r'<img[^>]*data-delayed-url="([^"]+)"[^>]*alt="advertiser logo"[^>]*>', html_content)
             if logo_match:
-                ad_data['advertiser_logo_url'] = logo_match.group(1)
+                ad_data['advertiser_logo'] = logo_match.group(1)
 
             advertiser_match = re.search(r'<a[^>]*href="https://www\.linkedin\.com/(?:company|in)/[^"]+"[^>]*>\s*([^<]+)\s*</a>', html_content)
             if advertiser_match:
@@ -480,7 +462,7 @@ class AsyncLinkedInCrawler:
             if redirect_match:
                 full_url = redirect_match.group(1)
                 url_parts = full_url.split('?')
-                ad_data['redirect_url'] = url_parts[0]
+                ad_data['ad_redirect_url'] = url_parts[0]
                 ad_data['utm_parameters'] = url_parts[1] if len(url_parts) > 1 else None
 
             # Extract Content
@@ -493,7 +475,7 @@ class AsyncLinkedInCrawler:
                 ad_data['description'] = clean_text(description_match.group(1).strip())
             else:
                 self.logger.warning(f"Description not found for adId: {ad_data.get('ad_id')}")
-                ad_data['description'] = 'No description available.'
+                ad_data['description'] = None
 
             # Extract Image URL
             img_match = re.search(r'<img[^>]*class="[^"]*ad-preview__dynamic-dimensions-image[^"]*"[^>]*src="([^"]+)"', html_content)
@@ -504,6 +486,10 @@ class AsyncLinkedInCrawler:
             company_match = re.search(r'<a[^>]*href="https://www\.linkedin\.com/company/(\d+)"[^>]*>', html_content)
             if company_match:
                 ad_data['company_id'] = company_match.group(1)
+
+            # Instead of trying to extract company_id from the page,
+            # use the one provided during crawler initialization
+            ad_data['company_id'] = int(self.company_id)  # Make sure it's an integer
 
             return ad_data
 
@@ -559,3 +545,167 @@ class AsyncLinkedInCrawler:
 
         # Allow everything else
         await route.continue_()
+
+    async def upsert_ad(self, db: AsyncSession, ad_data: dict):
+        """Upsert ad with consistent field names and transformations"""
+        try:
+            # Validate required fields
+            if not ad_data.get('ad_id'):
+                raise ValueError("ad_id is required")
+
+            # Transform data once with correct field names
+            transformed_data = self._transform_ad_data(ad_data)
+            
+            # Check for existing ad
+            existing_ad = await db.execute(
+                select(LinkedInAd).where(LinkedInAd.ad_id == transformed_data['ad_id'])
+            )
+            existing_ad = existing_ad.scalars().first()
+
+            if existing_ad:
+                # Update existing ad if needed
+                needs_update = False
+                for field, new_value in transformed_data.items():
+                    current_value = getattr(existing_ad, field)
+                    
+                    # Skip id field
+                    if field == 'ad_id':
+                        continue
+                        
+                    # Handle different types of comparisons
+                    if isinstance(current_value, (date, datetime)):
+                        if new_value and current_value != new_value:
+                            setattr(existing_ad, field, new_value)
+                            needs_update = True
+                    elif isinstance(current_value, (dict, list)):
+                        if new_value and json.dumps(current_value) != json.dumps(new_value):
+                            setattr(existing_ad, field, new_value)
+                            needs_update = True
+                    elif current_value != new_value:
+                        setattr(existing_ad, field, new_value)
+                        needs_update = True
+                
+                if needs_update:
+                    await db.commit()
+                    return 'updated'
+                return 'existing'
+            else:
+                # Create new ad
+                new_ad = LinkedInAd(**transformed_data)
+                db.add(new_ad)
+                await db.commit()
+                return 'new'
+
+        except Exception as e:
+            await db.rollback()
+            self.logger.error(f"Error in upsert_ad: {str(e)}")
+            raise
+
+    def _transform_ad_data(self, data: dict) -> dict:
+        """Transform ad data to match LinkedInAd model fields"""
+        transformed = {}
+        
+        # Direct field mappings (all fields should match LinkedInAd model)
+        for field in [
+            'ad_id', 'creative_type', 'advertiser_name', 'advertiser_logo',
+            'headline', 'description', 'promoted_text', 'image_url',
+            'view_details_link', 'campaign_impressions_range',
+            'company_id', 'ad_type', 'ad_redirect_url', 'utm_parameters'
+        ]:
+            if field in data:
+                transformed[field] = data[field]
+        
+        # Handle date fields
+        for date_field in ['campaign_start_date', 'campaign_end_date']:
+            if data.get(date_field):
+                try:
+                    transformed[date_field] = datetime.strptime(
+                        data[date_field], '%Y/%m/%d'
+                    ).date()
+                except ValueError:
+                    transformed[date_field] = None
+        
+        # Handle JSON fields
+        if 'campaign_impressions_by_country' in data:
+            transformed['campaign_impressions_by_country'] = (
+                data['campaign_impressions_by_country']
+                if isinstance(data['campaign_impressions_by_country'], (dict, list))
+                else json.loads(data['campaign_impressions_by_country'])
+            )
+        
+        # Ensure company_id is integer
+        if 'company_id' in transformed:
+            try:
+                transformed['company_id'] = int(transformed['company_id'])
+            except (ValueError, TypeError):
+                transformed['company_id'] = None
+        
+        return transformed
+
+    async def process_chunk_with_retry(self, chunk: list, pages: list, db: AsyncSession, 
+                                     chunk_index: int, total_chunks: int, 
+                                     max_retries: int = 3) -> tuple[int, int, int]:
+        """Process a chunk of URLs with retry mechanism"""
+        new_ads = updated_ads = existing_ads = 0
+        
+        for attempt in range(max_retries):
+            try:
+                tasks = []
+                for i, url in enumerate(chunk):
+                    page_index = i % len(pages)
+                    task = asyncio.create_task(
+                        self.extract_ad_details(
+                            pages[page_index],
+                            url,
+                            f"[Chunk {chunk_index + 1}/{total_chunks}]"
+                        )
+                    )
+                    tasks.append(task)
+
+                # Process chunk in parallel
+                chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Filter out errors and collect ad details
+                successful_ads = []
+                for result in chunk_results:
+                    if isinstance(result, Exception):
+                        self.logger.error(f"Failed to process URL: {str(result)}")
+                    elif result:
+                        successful_ads.append(result)
+
+                # Save chunk to database
+                if successful_ads:
+                    try:
+                        for ad in successful_ads:
+                            status = await self.upsert_ad(db, ad)
+                            if status == 'new':
+                                new_ads += 1
+                            elif status == 'updated':
+                                updated_ads += 1
+                            elif status == 'existing':
+                                existing_ads += 1
+                        
+                        self.logger.info(
+                            f"Saved {len(successful_ads)} ads from chunk "
+                            f"{chunk_index + 1}/{total_chunks} "
+                            f"(New: {new_ads}, Updated: {updated_ads}, Existing: {existing_ads})"
+                        )
+                        return new_ads, updated_ads, existing_ads
+                        
+                    except Exception as e:
+                        self.logger.error(f"Database error in chunk {chunk_index + 1}: {str(e)}")
+                        raise
+
+            except Exception as e:
+                self.logger.error(
+                    f"Error processing chunk {chunk_index + 1} (attempt {attempt + 1}/{max_retries}): {str(e)}"
+                )
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5  # Exponential backoff: 5s, 10s, 15s
+                    self.logger.info(f"Retrying in {wait_time} seconds...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    self.logger.error(f"Failed to process chunk {chunk_index + 1} after {max_retries} attempts")
+                    return 0, 0, 0
+
+        return 0, 0, 0

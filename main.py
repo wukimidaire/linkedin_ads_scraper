@@ -66,7 +66,7 @@ class AdProcessingService:
                     campaign_start_date=start_date,
                     campaign_end_date=end_date,
                     campaign_impressions_range=ad.get('total_impressions'),
-                    campaign_impressions_by_country=ad.get('country_impressions'),
+                    campaign_impressions_by_country=ad.get('campaign_impressions_by_country'),
                     company_id=int(company_id) if company_id.isdigit() else None,
                     ad_type=ad.get('ad_type'),
                     ad_redirect_url=ad.get('redirect_url'),
