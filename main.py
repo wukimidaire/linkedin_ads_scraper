@@ -185,3 +185,5 @@ async def setup_browser_context(playwright) -> tuple[Browser, BrowserContext]:
         viewport=browser_config.VIEWPORT
     )
     return browser, context
+
+

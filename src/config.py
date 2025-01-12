@@ -10,7 +10,7 @@ class BrowserConfig:
     VIEWPORT = {'width': 1280, 'height': 800}  # Smaller viewport for better stability
     PAGE_TIMEOUT = 60000  # Increased timeout
     NAVIGATION_TIMEOUT = 60000  # Increased timeout
-    MAX_CONCURRENT_PAGES = 2  # Reduced concurrent pages
+    MAX_CONCURRENT_PAGES = 1  # Reduced concurrent pages
     CHUNK_SIZE = 2  # Reduced chunk size
     RETRY_COUNT = 5  # Increased retry count
     RETRY_DELAY = 5  # Increased delay between retries
@@ -23,9 +23,18 @@ class CrawlerConfig:
         'MIN': 3,
         'MAX': 500
     }
-    SCROLL_WAIT_TIME = 3  # seconds
+    SCROLL_WAIT_TIME = 2  # seconds
     NETWORK_IDLE_TIMEOUT = 5000  # milliseconds
     MAX_CONSECUTIVE_UNCHANGED = 5
+    INITIAL_WAIT_TIME = 5
+    BASE_SCROLL_WAIT = 3
+    SCROLL_INCREMENT = 1
+    MAX_UNCHANGED_SCROLLS = 5
+    MAX_SCROLL_COUNT = 20
+    CHUNK_SIZE = 5
+    MAX_RETRIES = 3
+    RETRY_DELAY = 5
+    PARALLEL_CHUNKS = 2
 
 
 class LogConfig:

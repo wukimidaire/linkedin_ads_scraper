@@ -44,6 +44,10 @@ steps:
   - '${PROJECT_ID}:europe-west1:postgres'
   - '--env-vars-file'
   - '.env.yaml'
+  - '--concurrency'
+  - '1'
+  - '--timeout'
+  - '3600'
 
 images:
 - 'gcr.io/$PROJECT_ID/linkedin-ad-crawler'

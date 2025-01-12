@@ -43,147 +43,116 @@ class AsyncLinkedInCrawler:
             'success_rate': 0,
             'avg_processing_time': 0
         }
+        self.active_contexts = []
+        self.active_pages = []
 
     async def collect_ad_urls(self, page: Page) -> None:
         """Collect all ad URLs from the page"""
         self.metrics['start_time'] = time.time()
         self.logger.info("Starting URL collection")
         
-        # Generate and navigate to the LinkedIn Ad Library URL
         url = generate_linkedin_url(self.company_id)
         self.logger.info(f"Navigating to {url}")
         
         try:
-            # Change navigation strategy
-            await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            # Simple initial load - we just need the page to start
+            await page.goto(
+                url, 
+                wait_until='domcontentloaded', 
+                timeout=browser_config.NAVIGATION_TIMEOUT
+            )
+            await asyncio.sleep(crawler_config.INITIAL_WAIT_TIME)
             
-            # Add additional wait for content
-            try:
-                await page.wait_for_selector("a[href*='/ad-library/detail/']", 
-                                           timeout=15000,
-                                           state='attached')
-            except Exception as e:
-                self.logger.warning(f"Initial content wait timeout: {str(e)}")
-                # Continue anyway as content might load later
-            
-            # Add a small delay to allow dynamic content to load
-            await asyncio.sleep(5)
-            
-            self.logger.info("Successfully loaded the page")
-        except Exception as e:
-            self.logger.error(f"Failed to load page: {str(e)}")
-            # Add retry mechanism
-            for attempt in range(3):
+            previous_links_count = 0
+            consecutive_unchanged_counts = 0
+            scroll_count = 0
+
+            # Optimized scroll loop for endless scroll
+            while True:
+                self.logger.debug(f"Scroll iteration {scroll_count}")
+                
                 try:
-                    self.logger.info(f"Retrying navigation (attempt {attempt + 1}/3)")
-                    await asyncio.sleep(5 * (attempt + 1))  # Exponential backoff
-                    await page.goto(url, wait_until='domcontentloaded', timeout=45000)
-                    break
-                except Exception as retry_e:
-                    self.logger.error(f"Retry {attempt + 1} failed: {str(retry_e)}")
-                    if attempt == 2:  # Last attempt
-                        return
-
-        previous_links_count = 0
-        consecutive_unchanged_counts = 0
-        scroll_count = 0
-        last_height = 0
-
-        # Wait for initial content
-        try:
-            await page.wait_for_selector("a[href*='/ad-library/detail/']", timeout=5000)
-        except Exception as e:
-            self.logger.warning(f"Initial content wait timeout: {str(e)}")
-
-        base_wait_time = 2  # Start with a 2-second wait time
-        increment = 1  # Increase wait time by 2 seconds after each scroll
-
-        while True:
-            self.logger.debug(f"Scroll iteration {scroll_count}")
-            
-            # Get current scroll height and scroll
-            current_height = await page.evaluate('document.body.scrollHeight')
-            
-            if current_height == last_height:
-                consecutive_unchanged_counts += 1
-            else:
-                consecutive_unchanged_counts = 0
-                last_height = current_height
-
-            try:
-                await page.evaluate('''() => {
-                    window.scrollTo({
-                        top: document.body.scrollHeight,
-                        behavior: 'instant'
-                    });
-                    window.dispatchEvent(new Event('scroll'));
-                }''')
-                
-                # Wait for potential new content
-                await asyncio.sleep(base_wait_time + scroll_count * increment)
-                
-                # Check for new ads with more specific selector
-                links = await page.eval_on_selector_all(
-                    "a[href*='/ad-library/detail/']",
-                    "elements => Array.from(elements).map(el => el.href)"
-                )
-                
-                current_links = set()
-                for link in links:
-                    clean_link = link.split('?')[0]
-                    current_links.add(clean_link)
-                    if clean_link not in self.detail_urls:
-                        self.detail_urls.add(clean_link)
-                        self.logger.debug(f"Found new URL: {clean_link}")
-
-                # Log progress
-                if len(current_links) > previous_links_count:
-                    self.logger.info(f"Found {len(current_links) - previous_links_count} new URLs. Total: {len(self.detail_urls)}")
-                
-                previous_links_count = len(current_links)
-
-            except Exception as e:
-                self.logger.error(f"Error during scroll: {str(e)}")
-                consecutive_unchanged_counts += 1
-
-            scroll_count += 1
-
-            # More sophisticated exit conditions
-            if consecutive_unchanged_counts >= 5 and scroll_count >= 3:
-                # Double-check by scrolling back up and down
-                try:
-                    await page.evaluate('window.scrollTo(0, 0)')
-                    await asyncio.sleep(1)
+                    # Add more detailed logging
+                    self.logger.debug("Attempting to scroll...")
                     await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                    await asyncio.sleep(2)
                     
-                    final_links = await page.eval_on_selector_all(
+                    # Incremental wait time based on consecutive unchanged counts
+                    wait_time = crawler_config.BASE_SCROLL_WAIT + (consecutive_unchanged_counts * crawler_config.SCROLL_INCREMENT)
+                    self.logger.debug(f"Waiting for {wait_time} seconds...")
+                    await asyncio.sleep(wait_time)
+                    
+                    # Log before link collection
+                    self.logger.debug("Collecting links...")
+                    links = await page.eval_on_selector_all(
                         "a[href*='/ad-library/detail/']",
                         "elements => Array.from(elements).map(el => el.href)"
                     )
                     
-                    for link in final_links:
-                        clean_link = link.split('?')[0]
-                        if clean_link not in self.detail_urls:
-                            self.detail_urls.add(clean_link)
-                            self.logger.debug(f"Found additional URL in final check: {clean_link}")
+                    current_links = set(link.split('?')[0] for link in links)
+                    new_links = len(current_links) - previous_links_count
                     
+                    self.logger.debug(f"Current scroll position: {await page.evaluate('window.scrollY')}")
+                    self.logger.debug(f"Page height: {await page.evaluate('document.body.scrollHeight')}")
+                    
+                    if new_links > 0:
+                        self.logger.info(f"Found {new_links} new URLs. Total: {len(current_links)}")
+                        consecutive_unchanged_counts = 0
+                    else:
+                        consecutive_unchanged_counts += 1
+                        self.logger.debug(f"No new links found. Consecutive unchanged: {consecutive_unchanged_counts}")
+                    
+                    self.detail_urls.update(current_links)
+                    previous_links_count = len(current_links)
+
                 except Exception as e:
-                    self.logger.error(f"Error during final check: {str(e)}")
+                    self.logger.error(f"Error during scroll: {str(e)}\nTraceback: {e.__traceback__}")
+                    consecutive_unchanged_counts += 1
 
-                self.logger.info(f"URL collection complete. Found {len(self.detail_urls)} unique URLs")
-                break
+                scroll_count += 1
 
-            # Prevent infinite loops
-            if scroll_count >50:
-                self.logger.warning("Reached maximum scroll count")
-                break
+                # Exit if no new URLs after several attempts
+                if consecutive_unchanged_counts >= crawler_config.MAX_UNCHANGED_SCROLLS:
+                    # Try one final scroll check before giving up
+                    try:
+                        # Quick scroll to top and bottom
+                        await page.evaluate('window.scrollTo(0, 0)')
+                        await asyncio.sleep(crawler_config.SCROLL_WAIT_TIME)
+                        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                        await asyncio.sleep(crawler_config.SCROLL_WAIT_TIME)
+                        
+                        # One final check for any missed URLs
+                        final_links = await page.eval_on_selector_all(
+                            "a[href*='/ad-library/detail/']",
+                            "elements => Array.from(elements).map(el => el.href)"
+                        )
+                        final_set = set(link.split('?')[0] for link in final_links)
+                        
+                        if len(final_set) > len(self.detail_urls):
+                            self.logger.info(f"Found {len(final_set) - len(self.detail_urls)} additional URLs in final check")
+                            self.detail_urls.update(final_set)
+                            consecutive_unchanged_counts = 0
+                            continue
+                        
+                        self.logger.info("No new URLs found in final check, proceeding to process ads")
+                        break  # This will exit the loop and continue to process_all_ads
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error during final check: {str(e)}")
+                        break  # Even if final check fails, we should proceed to process collected URLs
 
-        self.metrics['url_collection_time'] = time.time() - self.metrics['start_time']
-        self.logger.info(f"URL collection took {self.metrics['url_collection_time']:.2f} seconds")
+                # Safety limit
+                if scroll_count > crawler_config.MAX_SCROLL_COUNT:
+                    self.logger.warning("Reached maximum scroll count")
+                    break
+
+            self.logger.info(f"URL collection complete. Found {len(self.detail_urls)} unique URLs")
+            self.metrics['url_collection_time'] = time.time() - self.metrics['start_time']
+
+        except Exception as e:
+            self.logger.error(f"Failed to collect URLs: {str(e)}")
 
     async def process_all_ads(self, page: Page, db: AsyncSession) -> int:
-        """Process all collected ad URLs and save them to the database in chunks"""
+        """Process all collected ad URLs and save them to the database"""
         processing_start = time.time()
         total_ads = len(self.detail_urls)
         
@@ -192,7 +161,6 @@ class AsyncLinkedInCrawler:
             return 0
         
         start_time = datetime.now()
-        processed_count = 0
         new_ads = 0
         updated_ads = 0
         existing_ads = 0
@@ -213,29 +181,10 @@ class AsyncLinkedInCrawler:
                 contexts.append(context)
                 pages.append(await context.new_page())
 
-            # Process URLs in chunks
-            url_chunks = [list(urls) for urls in self._chunk_urls(self.detail_urls, CHUNK_SIZE)]
-            
-            for chunk_index, url_chunk in enumerate(url_chunks):
-                chunk_start = time.time()
-                
-                # Process chunk with retry mechanism
-                new, updated, existing = await self.process_chunk_with_retry(
-                    url_chunk, pages, db, chunk_index, len(url_chunks)
-                )
-                
-                new_ads += new
-                updated_ads += updated
-                existing_ads += existing
-                processed_count += new + updated + existing
-
-                # Track chunk processing time
-                chunk_time = time.time() - chunk_start
-                self.metrics['processing_times'].append(chunk_time)
-                
-                # Add delay between chunks
-                if chunk_index < len(url_chunks) - 1:
-                    await asyncio.sleep(RETRY_DELAY)
+            # Process all URLs without chunking
+            new_ads, updated_ads, existing_ads = await self.process_urls(
+                list(self.detail_urls), pages, db
+            )
 
             # Calculate final metrics
             total_time = time.time() - processing_start
@@ -247,10 +196,9 @@ class AsyncLinkedInCrawler:
             self.logger.info(
                 f"\nPerformance Metrics:\n"
                 f"- Total Processing Time: {total_time:.2f}s\n"
-                f"- Average Chunk Processing Time: {self.metrics['avg_processing_time']:.2f}s\n"
+                f"- Average Processing Time: {self.metrics['avg_processing_time']:.2f}s\n"
                 f"- Success Rate: {self.metrics['success_rate']:.1f}%\n"
                 f"- Failed URLs: {len(self.metrics['failed_urls'])}\n"
-                f"- URL Collection Time: {self.metrics['url_collection_time']:.2f}s\n"
                 f"- New Ads: {new_ads}\n"
                 f"- Updated Ads: {updated_ads}\n"
                 f"- Existing Ads: {existing_ads}"
@@ -262,6 +210,7 @@ class AsyncLinkedInCrawler:
                 await context.close()
 
         total_duration = (datetime.now() - start_time).total_seconds()
+        processed_count = new_ads + updated_ads + existing_ads
         success_rate = (processed_count / total_ads) * 100 if total_ads > 0 else 0
         
         self.logger.info(
@@ -270,6 +219,49 @@ class AsyncLinkedInCrawler:
         )
         
         return processed_count
+
+    async def process_urls(self, urls: list, pages: list, db: AsyncSession) -> tuple[int, int, int]:
+        """Process all URLs without chunking and track progress"""
+        new_ads = updated_ads = existing_ads = 0
+        total_urls = len(urls)
+        processed_count = 0
+        consecutive_existing_count = 0  # Counter for consecutive 'existing' statuses
+
+        for i, url in enumerate(urls):
+            page_index = i % len(pages)
+            try:
+                ad_details = await self.extract_ad_details(pages[page_index], url)
+                if ad_details:
+                    status = await self.upsert_ad(db, ad_details)
+                    if status == 'new':
+                        new_ads += 1
+                        consecutive_existing_count = 0  # Reset counter
+                    elif status == 'updated':
+                        updated_ads += 1
+                        consecutive_existing_count = 0  # Reset counter
+                    elif status == 'existing':
+                        existing_ads += 1
+                        consecutive_existing_count += 1  # Increment counter
+
+                    # Log detailed information about the ad processing status
+                    self.logger.info(
+                        f"Ad ID={ad_details.get('ad_id')} processed: Status={status}"
+                    )
+
+                    # Check if the consecutive 'existing' count exceeds 30
+                    if consecutive_existing_count > 30:
+                        self.logger.info("Aborting further processing due to 30+ consecutive 'existing' ads.")
+                        break
+
+                processed_count += 1
+                self.logger.info(f"Processed {processed_count}/{total_urls} ads ({(processed_count/total_urls)*100:.1f}%)")
+            except Exception as e:
+                self.logger.error(f"Failed to process URL: {str(e)}")
+
+        self.logger.info(
+            f"Processed ads (New: {new_ads}, Updated: {updated_ads}, Existing: {existing_ads})"
+        )
+        return new_ads, updated_ads, existing_ads
 
     async def extract_ad_details(self, page: Page, url: str, progress: str = "") -> dict:
         """Extract details from a single ad page"""
@@ -342,14 +334,12 @@ class AsyncLinkedInCrawler:
                 return await self._extract_page_content(page)
                     
             except Exception as e:
-                self.logger.error(f"Error on attempt {attempt + 1}: {str(e)}")
-                if "Timeout" in str(e):
-                    raise
-                if attempt == RETRY_COUNT - 1:
-                    self.logger.error(f"Failed to process {url} after {RETRY_COUNT} attempts")
-                    return None
-                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-                continue
+                self.logger.warning(f"Warning on attempt {attempt + 1}: {str(e)}")
+                if attempt < RETRY_COUNT - 1:
+                    wait_time = 5 * (attempt + 1)  # Exponential backoff
+                    await asyncio.sleep(wait_time)
+                    continue
+                return None
 
         return None
 
@@ -376,28 +366,6 @@ class AsyncLinkedInCrawler:
             self.logger.error(f"Error extracting demographics: {str(e)}")
         
         return demographics
-
-    def _chunk_urls(self, urls, size):
-        """Split URLs into chunks of specified size"""
-        urls = list(urls)
-        return [urls[i:i + size] for i in range(0, len(urls), size)]
-
-    async def process_chunk(self, chunk, pages):
-        tasks = []
-        for i, url in enumerate(chunk):
-            # Add progressive delay
-            delay = 2 + (i * 1)  # 2s, 3s, 4s, 5s
-            await asyncio.sleep(delay)
-            
-            page_index = i % len(pages)
-            task = asyncio.create_task(
-                self.extract_ad_details(
-                    pages[page_index],
-                    url,
-                    f"[Chunk {i+1}/{len(chunk)}]"
-                )
-            )
-            tasks.append(task)
 
     async def _extract_page_content(self, page: Page) -> dict:
         """Extract detailed ad content from the page"""
@@ -642,70 +610,13 @@ class AsyncLinkedInCrawler:
         
         return transformed
 
-    async def process_chunk_with_retry(self, chunk: list, pages: list, db: AsyncSession, 
-                                     chunk_index: int, total_chunks: int, 
-                                     max_retries: int = 3) -> tuple[int, int, int]:
-        """Process a chunk of URLs with retry mechanism"""
-        new_ads = updated_ads = existing_ads = 0
-        
-        for attempt in range(max_retries):
+    async def cleanup(self):
+        """Ensure all browser resources are properly cleaned up"""
+        for context in self.active_contexts:
             try:
-                tasks = []
-                for i, url in enumerate(chunk):
-                    page_index = i % len(pages)
-                    task = asyncio.create_task(
-                        self.extract_ad_details(
-                            pages[page_index],
-                            url,
-                            f"[Chunk {chunk_index + 1}/{total_chunks}]"
-                        )
-                    )
-                    tasks.append(task)
-
-                # Process chunk in parallel
-                chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Filter out errors and collect ad details
-                successful_ads = []
-                for result in chunk_results:
-                    if isinstance(result, Exception):
-                        self.logger.error(f"Failed to process URL: {str(result)}")
-                    elif result:
-                        successful_ads.append(result)
-
-                # Save chunk to database
-                if successful_ads:
-                    try:
-                        for ad in successful_ads:
-                            status = await self.upsert_ad(db, ad)
-                            if status == 'new':
-                                new_ads += 1
-                            elif status == 'updated':
-                                updated_ads += 1
-                            elif status == 'existing':
-                                existing_ads += 1
-                        
-                        self.logger.info(
-                            f"Saved {len(successful_ads)} ads from chunk "
-                            f"{chunk_index + 1}/{total_chunks} "
-                            f"(New: {new_ads}, Updated: {updated_ads}, Existing: {existing_ads})"
-                        )
-                        return new_ads, updated_ads, existing_ads
-                        
-                    except Exception as e:
-                        self.logger.error(f"Database error in chunk {chunk_index + 1}: {str(e)}")
-                        raise
-
+                await context.close()
             except Exception as e:
-                self.logger.error(
-                    f"Error processing chunk {chunk_index + 1} (attempt {attempt + 1}/{max_retries}): {str(e)}"
-                )
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 5  # Exponential backoff: 5s, 10s, 15s
-                    self.logger.info(f"Retrying in {wait_time} seconds...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    self.logger.error(f"Failed to process chunk {chunk_index + 1} after {max_retries} attempts")
-                    return 0, 0, 0
-
-        return 0, 0, 0
+                self.logger.error(f"Error closing context: {e}")
+        
+        self.active_contexts = []
+        self.active_pages = []
